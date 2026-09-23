@@ -97,6 +97,55 @@ def _popen_isolation():
     return {"start_new_session": True}
 
 
+def _highs_single_thread():
+    """Force every HiGHS LP solve (scipy.optimize.linprog, method="highs",
+    used for the Dantzig-Wolfe master) onto ONE thread.  HiGHS ignores the
+    OMP/BLAS variables and by default starts (cores + 1) // 2 threads -- 12 on
+    the 24-core server.  SciPy hands HiGHS an options dict through
+    _linprog_highs._highs_wrapper in every version; injecting threads=1 there
+    changes only the thread count (the solve itself is serial dual simplex)."""
+    try:
+        import scipy.optimize._linprog_highs as lh
+    except Exception:
+        return "scipy HiGHS interface not found"
+    orig = getattr(lh, "_highs_wrapper", None)
+    if orig is None:
+        return "scipy HiGHS wrapper not found"
+    if getattr(orig, "_mstkp_one_thread", False):
+        return "already single-threaded"
+
+    def one_thread(*args, **kwargs):
+        if "options" in kwargs:
+            kwargs["options"] = dict(kwargs["options"] or {}, threads=1)
+        elif args and isinstance(args[-1], dict):
+            args = args[:-1] + (dict(args[-1], threads=1),)
+        return orig(*args, **kwargs)
+
+    one_thread._mstkp_one_thread = True
+    lh._highs_wrapper = one_thread
+    return "single-threaded"
+
+
+def _os_threads():
+    try:
+        import psutil
+        return psutil.Process().num_threads()
+    except Exception:
+        return None
+
+
+def _highs_probe(fix):
+    """Thread count after one HiGHS LP solve, in this (fresh) process."""
+    import numpy as np
+    if fix:
+        _highs_single_thread()
+    from scipy.optimize import linprog
+    rng = np.random.default_rng(0)
+    A = rng.random((40, 120))
+    linprog(rng.random(120), A_ub=-A, b_ub=-A.sum(1) * 0.3, bounds=(0, 1), method="highs")
+    print(_os_threads())
+
+
 def _signal_worker(proc, hard=False):
     try:
         if IS_WINDOWS:
@@ -837,6 +886,16 @@ def cmd_machine_check(a):
         print(f"  {'gurobi':28s} gurobipy NOT importable -> Gurobi jobs will error")
     except Exception as exc:
         print(f"  {'gurobi':28s} PROBLEM: {exc}  (size-limited or missing licence?)")
+    probes = {}
+    for label, flag in (("default", "nofix"), ("benchmark", "fix")):
+        try:
+            out = subprocess.run([sys.executable, os.path.abspath(__file__), "highs-probe", flag],
+                                 capture_output=True, text=True, timeout=120, cwd=CODE_DIR)
+            probes[label] = out.stdout.strip().splitlines()[-1] if out.stdout.strip() else "?"
+        except Exception as exc:
+            probes[label] = f"? ({exc})"
+    print(f"  {'HiGHS threads per LP solve':28s} default {probes['default']}, "
+          f"in the benchmark {probes['benchmark']}  (must be 1)")
     if info["cgroup_cpu_quota"] and info["cgroup_cpu_quota"] < info["affinity_cpus"]:
         print("  WARNING: the container's CPU quota is below the visible CPU count; "
               "jobs beyond the quota would share CPUs and distort timings.")
@@ -931,6 +990,7 @@ def worker_main(spec_json):
         res["instance"].update(seed=inst.seed, n=inst.num_nodes, m=len(inst.edges),
                                budget=inst.budget)
         cfg = spec["config"]
+        res["run"]["highs_threads"] = _highs_single_thread()
         _test_fault(spec)
         if cfg["solver"] == "lrbnb":
             from benchmark_mstkp_ import run_lrbnb
@@ -959,6 +1019,7 @@ def worker_main(spec_json):
         res["run"]["finished"] = now_iso()
         res["run"]["worker_wall"] = time.time() - t_wall0
         res["run"]["peak_rss_mb"] = _peak_rss_mb()
+        res["run"]["os_threads_end"] = _os_threads()
         res["run"]["platform"] = sys.platform
         res["metrics"].setdefault("wall_time", time.time() - t_wall0)
     if not write_noclobber(spec["result_path"], jdump(res)):
@@ -1556,6 +1617,7 @@ def cmd_collect(a):
             row["solver_code_hash"] = run.get("solver_code_hash")
             row["run_id"] = run.get("run_id")
             row["peak_rss_mb"] = run.get("peak_rss_mb")
+            row["os_threads_end"] = run.get("os_threads_end")
             row["error"] = (r.get("error") or "")[:300].replace("\n", " | ")
             mon = p_monitor(a.root, cid, j.cfg, j.idx)
             if os.path.exists(mon):
@@ -1573,8 +1635,9 @@ def cmd_collect(a):
             te = run.get("threads_env") or {}
             if te and any(v != "1" for v in te.values()):
                 integrity["threads_env_not_1"] += 1
-            if row.get("max_threads") and cfg["solver"] == "lrbnb" and row["max_threads"] > 1:
-                integrity["multi_threaded_workers"].append(f"{j.label()}:{row['max_threads']}")
+            thr = row.get("os_threads_end") or row.get("max_threads")
+            if thr and cfg["solver"] == "lrbnb" and thr > 1:
+                integrity["multi_threaded_workers"].append(f"{j.label()}:{thr}")
             rows.append(row)
             d = {"family": name, "cell_id": cid, "config_id": j.cfg, "idx": j.idx}
             for k, v in (r.get("diag") or {}).items():
@@ -1591,7 +1654,8 @@ def cmd_collect(a):
     integrity["multi_threaded_workers"] = integrity["multi_threaded_workers"][:50]
     ok = (not integrity["zstar_disagreements"] and not integrity["solution_failures"]
           and not integrity["cutoff_violations"] and not integrity["key_mismatch"]
-          and len(integrity["code_hashes"]) <= 1 and not integrity["threads_env_not_1"])
+          and len(integrity["code_hashes"]) <= 1 and not integrity["threads_env_not_1"]
+          and not integrity["multi_threaded_workers"])
     integrity["ok"] = ok
     write_replace(os.path.join(out_dir, f"{tag}_integrity.json"), jdump(integrity))
     print(json.dumps({k: (v if not isinstance(v, list) else len(v)) for k, v in integrity.items()},
@@ -1699,6 +1763,7 @@ def cmd_try(a):
     import contextlib
     import io
     from mstkpinstance import MSTKPInstance
+    _highs_single_thread()
     cfg_ids = _expand_try_configs(a.configs)
     for cid in cfg_ids:
         try:
@@ -1817,6 +1882,8 @@ def main(argv=None):
         if name == "plan":
             r.add_argument("--out", default=None)
     sub.add_parser("select-beta")
+    hp = sub.add_parser("highs-probe")          # internal, used by machine-check
+    hp.add_argument("mode", choices=["fix", "nofix"])
     t = sub.add_parser("try", help="ad-hoc run(s) on one generated instance; writes nothing")
     t.add_argument("--n", "--num-nodes", dest="n", type=int, required=True)
     t.add_argument("--density", type=float, required=True)
@@ -1837,6 +1904,8 @@ def main(argv=None):
     a.root = os.path.abspath(a.root)
     if a.cmd == "worker":
         return worker_main(a.spec)
+    if a.cmd == "highs-probe":
+        return _highs_probe(a.mode == "fix") or 0
     return {"machine-check": cmd_machine_check, "describe": cmd_describe,
             "generate": cmd_generate, "run": cmd_run, "run-one": cmd_run_one,
             "plan": cmd_plan, "status": cmd_status, "collect": cmd_collect,

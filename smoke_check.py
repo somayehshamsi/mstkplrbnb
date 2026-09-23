@@ -95,11 +95,12 @@ def main():
         hashes.add(run.get("solver_code_hash"))
         te = run.get("threads_env") or {}
         R.check(te and all(v == "1" for v in te.values()), f"{lab}: thread env {te}")
-        mon = FS.p_monitor(root, j.cell["id"], j.cfg, j.idx)
-        if os.path.exists(mon) and cfg["solver"] == "lrbnb":
-            mo = FS.read_json(mon)
-            R.check(mo.get("max_threads", 1) <= 1,
-                    f"{lab}: LR worker ran {mo.get('max_threads')} threads")
+        if cfg["solver"] == "lrbnb":
+            thr = run.get("os_threads_end")
+            if thr is None:
+                mon = FS.p_monitor(root, j.cell["id"], j.cfg, j.idx)
+                thr = FS.read_json(mon).get("max_threads") if os.path.exists(mon) else None
+            R.check(not thr or thr <= 1, f"{lab}: LR worker ran {thr} threads")
         if st not in OK_STATUSES:
             continue
         req = LR_REQUIRED if cfg["solver"] == "lrbnb" else GRB_REQUIRED

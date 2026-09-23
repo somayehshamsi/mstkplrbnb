@@ -139,6 +139,7 @@ def main():
     ap.add_argument("--time-limit", type=float, default=60.0)
     a = ap.parse_args()
 
+    FS._highs_single_thread()
     fam = FS.build_families("final", "/nonexistent")
     configs = sorted({c for b in fam.values() for _, _, cs in b for c in cs
                       if not c.startswith("GRB-")})

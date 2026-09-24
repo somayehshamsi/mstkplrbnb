@@ -146,6 +146,54 @@ def _highs_probe(fix):
     print(_os_threads())
 
 
+def _install_soft_memory_stop(limit_gb, frac=1.0):
+    """LR-BnB counterpart of Gurobi's SoftMemLimit.  Once this process's RSS
+    passes frac * limit, the branch-and-bound loop ends at its next node
+    boundary exactly as at a time limit, so the run reports its incumbent and
+    lower bound (status "memory") instead of being killed without either.
+    It fires at exactly the per-run limit (the runner's hard kill moved 10%
+    above it), so every run that stays below the limit behaves exactly as
+    before this stop existed.
+    Checked by a 1 s interval timer in the MAIN thread (no helper thread);
+    a run that never reaches the threshold is not affected in any way."""
+    import signal as _signal
+    try:
+        import psutil
+        proc = psutil.Process()
+    except Exception:
+        return None
+    if os.environ.get("MSTKP_TEST_SOFT_GB"):          # smoke test only
+        limit_gb, frac = float(os.environ["MSTKP_TEST_SOFT_GB"]), 1.0
+    state = {"fired": False, "rss_gb": None, "threshold_gb": frac * float(limit_gb)}
+    real_time = time.time
+
+    class _StopClock:
+        # Stands in for the `time` module inside branchandbound only: its
+        # single time-limit test (time.time() - start > limit) then trips.
+        def __getattr__(self, name):
+            return getattr(time, name)
+
+        @staticmethod
+        def time():
+            return real_time() + 1e12
+
+    def _check(signum, frame):
+        if state["fired"]:
+            return
+        try:
+            rss = proc.memory_info().rss
+        except Exception:
+            return
+        if rss / 1e9 > state["threshold_gb"]:
+            state["fired"], state["rss_gb"] = True, round(rss / 1e9, 2)
+            import branchandbound
+            branchandbound.time = _StopClock()
+
+    _signal.signal(_signal.SIGALRM, _check)
+    _signal.setitimer(_signal.ITIMER_REAL, 1.0, 1.0)
+    return state
+
+
 def _signal_worker(proc, hard=False):
     try:
         if IS_WINDOWS:
@@ -741,7 +789,7 @@ def mem_reservation_gb(job):
     else:
         r = 1.0 + m / 12500.0
         limit = inst_limit
-        kill = limit                               # enforced by the runner
+        kill = 1.1 * limit                         # backstop; the worker stops itself at limit
     if os.environ.get("MSTKP_TEST_KILL_GB"):          # smoke test only
         kill = float(os.environ["MSTKP_TEST_KILL_GB"])
     return r, limit, kill
@@ -994,9 +1042,22 @@ def worker_main(spec_json):
         _test_fault(spec)
         if cfg["solver"] == "lrbnb":
             from benchmark_mstkp_ import run_lrbnb
-            m = run_lrbnb(inst, cfg, spec["time_limit"], inst.seed,
-                          cutoff=spec.get("cutoff"))
+            soft = (_install_soft_memory_stop(spec["mem_limit_gb"])
+                    if spec.get("mem_limit_gb") else None)
+            try:
+                m = run_lrbnb(inst, cfg, spec["time_limit"], inst.seed,
+                              cutoff=spec.get("cutoff"))
+            finally:
+                if soft is not None:
+                    import signal as _signal
+                    _signal.setitimer(_signal.ITIMER_REAL, 0, 0)
             res["diag"] = m.pop("diag", {})
+            if soft is not None:
+                res["run"]["soft_memory_stop_gb"] = soft["threshold_gb"]
+                if (soft["fired"] and m.get("status") == "timeout"
+                        and m.get("wall_time", 0) < float(spec["time_limit"])):
+                    m["status"], m["solved"] = "memory", False
+                    m["memory_stop_rss_gb"] = soft["rss_gb"]
         else:
             from gurobi_baselines import run_gurobi
             m = run_gurobi(inst, cfg["formulation"], spec["time_limit"],
@@ -1107,6 +1168,15 @@ class Runner:
         self.driver_hash = sha256_file(os.path.abspath(__file__))[:16]
         self.cpu_slots = self._cpu_slots() if a.pin else []
         self.free_slots = list(self.cpu_slots)
+        self.heavy = set()          # jobs preempted for memory: reserve their limit
+        self.pending = []
+        self.last_preempt = 0.0
+        self.n_preempted = 0
+        try:
+            import psutil
+            self.mem_total_gb = psutil.virtual_memory().total / 1e9
+        except Exception:
+            self.mem_total_gb = None
 
     def log(self, msg):
         line = f"[{datetime.now().strftime('%H:%M:%S')}] {msg}"
@@ -1154,8 +1224,14 @@ class Runner:
                     "platform": sys.platform},
         }
 
+    def _reservation(self, job):
+        r, limit, _ = mem_reservation_gb(job)
+        return limit if job.key in self.heavy else r
+
     def _launch(self, job, cutoff):
         mem_res, mem_limit, kill_gb = mem_reservation_gb(job)
+        if job.key in self.heavy:
+            mem_res = mem_limit
         cpu = self.free_slots.pop(0) if self.free_slots else None
         spec = self._spec(job, cutoff, mem_res, mem_limit, cpu)
         logp = p_log(self.root, job.cell["id"], job.cfg, job.idx)
@@ -1203,7 +1279,10 @@ class Runner:
 
     def _finish(self, pid, r, interrupted=False):
         job = r["job"]
-        interrupted = interrupted or r["killed"] == "interrupted"
+        preempted = r["killed"] == "preempted"
+        interrupted = interrupted or r["killed"] in ("interrupted", "preempted")
+        if preempted and not os.path.exists(p_result(self.root, job.cell["id"], job.cfg, job.idx)):
+            self.pending.append(job)            # rerun later, alone with its full reservation
         r["log"].close()
         if r["cpu"] is not None:
             self.free_slots.append(r["cpu"])
@@ -1256,6 +1335,36 @@ class Runner:
             self.log(f"{self.stats['done']:>5}/{self.n_todo} {job.label():64s} "
                      f"{status:14s} {elapsed:8.1f}s rss={r['max_rss']:.0f}MB")
 
+    def _memory_guard(self):
+        """If the MACHINE (all users) is about to run out of memory, stop the
+        running job using most memory and requeue it: it reruns later with
+        its full limit reserved.  No result is ever recorded under memory
+        pressure, so every stored result ran against its own limit only."""
+        try:
+            import psutil
+            free = psutil.virtual_memory().available / 1e9
+        except Exception:
+            return
+        if os.environ.get("MSTKP_TEST_FREE_GB"):          # smoke test only
+            free = float(os.environ["MSTKP_TEST_FREE_GB"])
+            if self.n_preempted >= int(os.environ.get("MSTKP_TEST_PREEMPTS", "1")):
+                return
+        testing = bool(os.environ.get("MSTKP_TEST_FREE_GB"))
+        floor = max(1.0, 0.05 * (self.mem_total_gb or 80.0))   # 4.6 GB on the 92 GB server
+        live = [r for r in self.running.values() if not r["killed"]]
+        if free >= floor or len(live) < 2 or time.time() - self.last_preempt < 15:
+            return
+        victim = max(live, key=lambda r: r["cur_rss"])
+        if victim["cur_rss"] < 1024 and not testing:
+            return          # low memory is not ours: stopping a small job would not help
+        self.log(f"memory pressure ({free:.1f} GB free < {floor:.1f} GB): stopping "
+                 f"{victim['job'].label()} ({victim['cur_rss']:.0f} MB); it is requeued and "
+                 f"will rerun with its full memory reserved")
+        self.heavy.add(victim["job"].key)
+        self._kill(victim, "preempted")
+        self.last_preempt = time.time()
+        self.n_preempted += 1
+
     def _monitor(self):
         for pid, r in list(self.running.items()):
             proc = r["proc"]
@@ -1282,6 +1391,7 @@ class Runner:
                 self._kill(r, "timeout")
             if r["killed"] and time.time() - r.get("kill_t", 0) > 15:
                 _signal_worker(proc, hard=True)
+        self._memory_guard()
 
     def run(self):
         a = self.a
@@ -1306,7 +1416,7 @@ class Runner:
         for name in ("SIGINT", "SIGTERM", "SIGHUP", "SIGBREAK"):
             if hasattr(signal, name):
                 signal.signal(getattr(signal, name), self._signal)
-        pending = todo
+        self.pending = pending = todo
         head_wait = None
         last_beat = time.time()
         while (pending and not self.stop) or self.running:
@@ -1315,7 +1425,7 @@ class Runner:
                 launched = False
                 used = self._effective_mem()
                 for pos, job in enumerate(pending):
-                    res_gb = mem_reservation_gb(job)[0]
+                    res_gb = self._reservation(job)
                     if used + res_gb > mem_budget and self.running:
                         if pos == 0:
                             head_wait = head_wait or time.time()
@@ -1367,6 +1477,7 @@ class Runner:
             for pid, r in list(self.running.items()):
                 r["proc"].wait()
                 self._finish(pid, r, interrupted=True)
+        self.stats["preempted_and_rerun"] = self.n_preempted
         self.log(f"finished run {self.run_id}: {json.dumps(self.stats)}")
         return 130 if self.stop else 0
 
@@ -1432,7 +1543,7 @@ def cmd_run(a):
             rp = p_result(a.root, j.cell["id"], j.cfg, j.idx)
             if os.path.exists(rp):
                 st = read_json(rp)["metrics"].get("status")
-                if st in ("error", "crashed", "unreadable"):
+                if st in ("error", "crashed", "unreadable", "killed_memory"):
                     dst = os.path.join(a.root, "results_failed", j.cell["id"], j.cfg,
                                        f"{j.idx:03d}.{int(time.time())}.json")
                     os.makedirs(os.path.dirname(dst), exist_ok=True)
@@ -1869,7 +1980,7 @@ def main(argv=None):
         r.add_argument("--order-seed", type=int, default=20260923)
         r.add_argument("--allow-code-change", action="store_true")
         r.add_argument("--retry-failed", action="store_true",
-                       help="move error/crashed results aside and rerun them")
+                       help="move error / crashed / killed_memory results aside and rerun them")
         if name == "run":
             r.add_argument("--family", required=True)
         else:

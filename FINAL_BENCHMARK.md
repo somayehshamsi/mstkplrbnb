@@ -107,7 +107,12 @@ LR-BnB checks still run).
 Coverage: n from 200 to 8000; average degree from 15 to complete (up to
 150 000 edges); beta from 0.08 to 0.70; correlation from +0.5 to -0.9.
 Memory limit: one per instance for every solver (16 GB, more only for
-graphs with more than ~44 000 edges).
+graphs with more than ~44 000 edges).  A run that reaches it stops cleanly
+with its bounds (status `memory`): Gurobi through SoftMemLimit, LR-BnB
+through the same stop its time limit uses.  If the whole machine runs short
+of memory, the runner stops its largest job and reruns it later, so no
+result is ever recorded under memory pressure.  `python3
+diagnose_failures.py ~/mstkp_final` summarises memory stops and crashes.
 
 Freeze rule: families and configurations in `frozen/design.json` can never
 change under the same root; a family added later is accepted and recorded

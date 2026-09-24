@@ -32,7 +32,7 @@ LR_REQUIRED = ["status", "solved", "obj", "final_lb", "root_lb", "wall_time", "c
                "exact_dual_nodes", "rc_edges_excluded", "indicator_calls", "indicator_time"]
 GRB_REQUIRED = ["status", "solved", "obj", "final_lb", "root_lb", "wall_time", "nodes",
                 "build_time", "grb_runtime", "formulation"]
-OK_STATUSES = {"optimal", "timeout"}
+OK_STATUSES = {"optimal", "timeout", "memory"}   # memory = stopped at the memory limit, with bounds
 
 
 class Report:

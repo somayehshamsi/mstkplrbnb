@@ -5,7 +5,8 @@
 
 Reads tables/*_results.csv only (run `final_suite.py collect` first) and
 writes ROOT/paper/: every table as Markdown (.md), LaTeX booktabs (.tex) and
-CSV, plus paper_summary.md with all of them.
+CSV, plus paper_summary.md with all of them.  The .tex tables need the LaTeX packages booktabs and adjustbox (wide
+tables are shrunk to the text width).
 
 Pooled tests (declared before looking at X's per-instance data): paired
 geometric-mean ratios over ALL fresh instances of families X / XB, with a
@@ -57,9 +58,16 @@ def ratio_ci(r, lo, hi):
     return f"{fmt_num(r)} [{fmt_num(lo)}, {fmt_num(hi)}]" if not pd.isna(r) else "–"
 
 
+GROUP_TAG = (("confirm", "X"), ("large_", "L"), ("wide_", "W"), ("scale_", "C"),
+             ("complete_", "H"), ("grid_", "B"), ("calib", "CAL"), ("core", ""))
+
+
 def cell_label(cell):
     n, d, b, k = int(cell["n"]), float(cell["density"]), float(cell["beta"]), float(cell["knob"])
-    s = f"n={n}, " + ("complete" if d >= 1.0 else f"deg {d * (n - 1):.0f}") + f", β={b:g}"
+    g = str(cell.get("group", ""))
+    tag = next((t for pre, t in GROUP_TAG if g.startswith(pre)), "")
+    s = (f"[{tag}] " if tag and tag != "X" else "") + f"n={n}, " + \
+        ("complete" if d >= 1.0 else f"deg {d * (n - 1):.0f}") + f", β={b:g}"
     if abs(k) > 1e-9:
         s += f", ρ={KNOB_RHO.get(round(k, 4), k):+g}"
     if str(cell.get("group", "")).startswith("confirm"):
@@ -78,13 +86,24 @@ def write_table(out, name, title, df, note=""):
     with open(os.path.join(out, f"{name}.md"), "w") as f:
         f.write(md)
     df.to_csv(os.path.join(out, f"{name}.csv"), index=False)
-    esc = lambda x: (str(x).replace("&", r"\&").replace("%", r"\%").replace("_", r"\_")
-                     .replace("β", r"$\beta$").replace("ρ", r"$\rho$").replace("–", "--"))
+    symbols = {"β": r"$\beta$", "ρ": r"$\rho$", "λ": r"$\lambda$", "τ": r"$\tau$",
+               "→": r"$\to$", "≈": r"$\approx$", "×": r"$\times$", "≥": r"$\geq$",
+               "≤": r"$\leq$", "±": r"$\pm$", "–": "--"}
+
+    def esc(x):
+        x = str(x).replace("\\", r"\textbackslash{}")
+        for a, b in (("&", r"\&"), ("%", r"\%"), ("_", r"\_"), ("#", r"\#")):
+            x = x.replace(a, b)
+        for a, b in symbols.items():
+            x = x.replace(a, b)
+        return x
+    # adjustbox shrinks a table that is wider than the text, never enlarges it
     tex = [r"\begin{table}[htbp]", r"\centering", r"\small", rf"\caption{{{esc(title)}}}",
-           rf"\label{{tab:{name}}}", r"\begin{tabular}{" + "l" * len(df.columns) + "}",
+           rf"\label{{tab:{name}}}", r"\begin{adjustbox}{max width=\linewidth}",
+           r"\begin{tabular}{" + "l" * len(df.columns) + "}",
            r"\toprule", " & ".join(esc(c) for c in df.columns) + r" \\", r"\midrule"]
     tex += [" & ".join(esc(v) for v in row) + r" \\" for row in df.itertuples(index=False)]
-    tex += [r"\bottomrule", r"\end{tabular}"]
+    tex += [r"\bottomrule", r"\end{tabular}", r"\end{adjustbox}"]
     if note:
         tex.append(rf"\par\smallskip\footnotesize {esc(note)}")
     tex.append(r"\end{table}")
@@ -341,16 +360,22 @@ def main():
         ladder = [C(r) for r in FS.LADDER6] + [C("R0", variant="rit40"), C("R0", variant="it20")]
         ladder = [c for c in ladder if present(head["id"], c)]
         S = AF.summary(df[df.cell_id == head["id"]], ladder)
+        Hc = df[df.cell_id == head["id"]]
+        ipn = {c: float((Hc[Hc.config_id == c].lr_iterations.astype(float)
+                         / Hc[Hc.config_id == c].nodes.clip(lower=1).astype(float)).median())
+               for c in ladder}
         T = pd.DataFrame({
             "configuration": S.config, "solved": S.solved.astype(str) + "/" + S.N.astype(str),
             "SGM time (s)": [fmt_num(v) for v in S.sgm_time],
             "SGM nodes": [fmt_num(v) for v in S.sgm_nodes_common],
             "root iterations": [fmt_num(v) for v in S.median_root_iters],
+            "LR iterations / node": [fmt_num(ipn[c]) for c in S.config],
             "root gap (%)": [fmt_num(v) for v in S.median_root_gap_pct],
             "cuts (median)": [fmt_num(v) for v in S.median_cuts],
             "separation share": [fmt_num(v) for v in S.median_sep_share]})
         sections.append(write_table(out, "T1_headline", f"Headline cell: {cell_label(head)}", T,
-                                    f"SGM over all instances (time) and commonly solved ones (nodes); "
+                                    f"SGM over all instances (time) and commonly solved ones (nodes); LR "
+                                    f"iterations per node: median over runs, strong-branching probes included; "
                                     f"L* gap {fmt_num(float(S.median_lstar_gap_pct.iloc[0]))}%."))
         pairs = [(C("R0"), C("R1")), (C("R0", variant="rit40"), C("R1")), (C("R1"), C("R2")),
                  (C("R2"), C("R3")), (C("R3"), C("R4")), (C("R4"), C("R5")), (C("R2"), C("R5")),
@@ -455,7 +480,10 @@ def main():
                          "timeout": int(vc.get("timeout", 0)), "memory": int(vc.get("memory", 0)),
                          "other": int(len(g) - vc.get("optimal", 0) - vc.get("timeout", 0) - vc.get("memory", 0))})
     if rows:
-        sections.append(write_table(out, "T7_outcomes", "Run outcomes per family", pd.DataFrame(rows)))
+        sections.append(write_table(out, "T7_outcomes", "Run outcomes per family", pd.DataFrame(rows),
+                                    "A run shared by several families (same instance and configuration) "
+                                    "is counted in each of them, so the rows sum to more than the number of "
+                                    "unique runs."))
 
     # ---- T8: dual budget / robustness in every core cell ---------------------
     order = ["A", "B", "BL", "D", "C", "H", "L", "W"]
@@ -517,15 +545,21 @@ def main():
         if un.empty:
             continue
         un["gap_pct"] = 100.0 * (un.obj - un.final_lb) / un.obj
+        # A gap of 100% or more means the lower bound was <= 0 or missing:
+        # no usable bound, so such runs are counted rather than averaged.
+        un["useful"] = un.final_lb.notna() & (un.final_lb > 0) & (un.gap_pct < 100.0)
         for cfg, u in un.groupby("config_id"):
+            ok = u[u.useful]
             rows.append({"family": f, "configuration": cfg, "unsolved": len(u),
                          "of which memory": int(u.status.eq("memory").sum()),
-                         "median final gap (%)": fmt_num(u.gap_pct.median()),
-                         "max final gap (%)": fmt_num(u.gap_pct.max())})
+                         "no usable bound": int((~u.useful).sum()),
+                         "median final gap (%)": fmt_num(ok.gap_pct.median()) if len(ok) else "no bound",
+                         "max final gap (%)": fmt_num(ok.gap_pct.max()) if len(ok) else "no bound"})
     if rows:
         sections.append(write_table(out, "T10_unsolved_gaps", "Unsolved runs: remaining optimality gap",
                                     pd.DataFrame(rows), "Gap = 100 (incumbent - lower bound) / incumbent at "
-                                    "the time or memory limit; '–' where no bound was available."))
+                                    "the time or memory limit, over runs with a usable (positive) lower bound; "
+                                    "runs without one are counted separately."))
 
     # ---- facts: calibration and validation ----------------------------------------
     facts = []

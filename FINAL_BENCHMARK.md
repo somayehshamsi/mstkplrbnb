@@ -116,7 +116,10 @@ LR-BnB checks still run).
 Paper tables: `bash run_final.sh paper` writes ROOT/paper/ (Markdown, LaTeX,
 CSV): pooled confirmation tests over all fresh instances (stratified
 bootstrap, Holm), the budget curve, the headline ladder, your cuts vs the
-literature in every cell, LR-BnB vs Gurobi, branching, components, outcomes.
+literature in every cell, LR-BnB vs Gurobi, branching, components, outcomes,
+the dual budget / robustness in every core cell, the probe and primal channels,
+the remaining gaps of unsolved runs, calibration and validation facts, and
+figures (performance profile, scaling, budget curve) as PDF and PNG.
 
 Coverage: n from 200 to 8000; average degree from 15 to complete (up to
 150 000 edges); beta from 0.08 to 0.70; correlation from +0.5 to -0.9.

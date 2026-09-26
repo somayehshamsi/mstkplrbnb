@@ -155,6 +155,96 @@ def pooled(df, a, b, cells, B, rng):
     }
 
 
+# ----------------------------------------------------------------- figures
+def make_figures(df, fams, cellinfo, present, out, TL, plt):
+    made = []
+    style = {C("R0"): ("R0 (5 it.)", "tab:gray", "-"), C("R2"): ("R2 literature cuts", "tab:blue", "-"),
+             C("R5"): ("R5 your cuts", "tab:red", "-"),
+             C("R0", variant="it20"): ("R0, 20 it./node", "tab:green", "-"),
+             "GRB-SCF": ("Gurobi SCF", "tab:purple", "--"), "GRB-DMCF": ("Gurobi DMCF", "tab:brown", "--"),
+             "GRB-DCUT": ("Gurobi DCUT", "black", "--")}
+
+    # F1: performance profile over all cells with a Gurobi comparison
+    cfgs = [C("R0"), C("R2"), C("R5"), C("R0", variant="it20"), "GRB-SCF", "GRB-DCUT"]
+    cells = [cid for cid in cellinfo if all(present(cid, c) for c in cfgs)]
+    if cells:
+        sub = df[df.cell_id.isin(cells) & df.config_id.isin(cfgs)]
+        T = sub.pivot_table(index=["cell_id", "idx"], columns="config_id", values="wall_time", aggfunc="first")
+        S = sub.pivot_table(index=["cell_id", "idx"], columns="config_id", values="solved", aggfunc="first")
+        T = T[cfgs].where(S[cfgs].astype(bool), np.inf).dropna(how="any")
+        best = T.min(axis=1)
+        T = T[np.isfinite(best)]
+        best = best[np.isfinite(best)].clip(lower=1e-3)
+        taus = np.logspace(0, np.log10(TL), 300)
+        fig, ax = plt.subplots(figsize=(6, 4))
+        for c in cfgs:
+            r = (T[c].clip(lower=1e-3) / best).values
+            lab, col, ls = style[c]
+            ax.step(taus, [(r <= t).mean() for t in taus], where="post", label=lab, color=col, ls=ls)
+        ax.set_xscale("log"); ax.set_xlabel("time ratio to the best configuration (τ)")
+        ax.set_ylabel("share of instances"); ax.set_ylim(0, 1.02)
+        ax.set_title(f"Performance profile ({len(T)} instances, {len(cells)} cells)")
+        ax.legend(fontsize=8, loc="lower right"); ax.grid(alpha=.3)
+        for ext in ("pdf", "png"):
+            fig.savefig(os.path.join(out, f"F1_performance_profile.{ext}"), bbox_inches="tight", dpi=200)
+        plt.close(fig)
+        made.append("F1_performance_profile.pdf/png")
+
+    # F2: scaling at constant average degree (families C and L)
+    pts = []
+    for f in ("C", "L"):
+        for c, _, _ in fams.get(f, []):
+            if (df.cell_id == c["id"]).any():
+                pts.append(c)
+    if pts:
+        pts = sorted({c["n"]: c for c in pts}.values(), key=lambda c: c["n"])
+        fig, ax = plt.subplots(figsize=(6, 4))
+        for cfg in [C("R0"), C("R2"), C("R5"), C("R0", variant="it20"), "GRB-SCF", "GRB-DCUT"]:
+            xs, ys = [], []
+            for c in pts:
+                g = df[(df.cell_id == c["id"]) & (df.config_id == cfg)]
+                if len(g):
+                    xs.append(c["n"]); ys.append(AF.sgm(g.capped_time, AF.SHIFT_T))
+            if xs:
+                lab, col, ls = style[cfg]
+                ax.plot(xs, ys, marker="o", label=lab, color=col, ls=ls)
+        ax.axhline(TL, color="k", lw=.6, ls=":"); ax.set_xscale("log"); ax.set_yscale("log")
+        ax.set_xlabel("number of vertices n (average degree ≈ 15)"); ax.set_ylabel("SGM time (s)")
+        ax.set_title("Scaling"); ax.legend(fontsize=8); ax.grid(alpha=.3, which="both")
+        for ext in ("pdf", "png"):
+            fig.savefig(os.path.join(out, f"F2_scaling.{ext}"), bbox_inches="tight", dpi=200)
+        plt.close(fig)
+        made.append("F2_scaling.pdf/png")
+
+    # F3: budget curve on the fresh instances
+    xcells = [c["id"] for c, _, _ in fams.get("X", []) if (df.cell_id == c["id"]).any()]
+    curve = [(5, C("R0")), (10, C("R0", variant="it10")), (20, C("R0", variant="it20")),
+             (40, C("R0", variant="it40")), (80, C("R0", variant="it80"))]
+    curve = [(k, c) for k, c in curve if (df[df.cell_id.isin(xcells)].config_id == c).any()]
+    if len(curve) >= 2:
+        regimes = {"sparse / loose": [c for c in xcells if cellinfo[c]["density"] < 1.0],
+                   "complete graphs": [c for c in xcells if cellinfo[c]["density"] >= 1.0]}
+        fig, axes = plt.subplots(1, 2, figsize=(9, 3.6))
+        for reg, cells in regimes.items():
+            if not cells:
+                continue
+            sub = df[df.cell_id.isin(cells)]
+            ks = [k for k, _ in curve]
+            t = [AF.sgm(sub[sub.config_id == c].capped_time, AF.SHIFT_T) for _, c in curve]
+            sv = [sub[sub.config_id == c].solved.mean() for _, c in curve]
+            axes[0].plot(ks, t, marker="o", label=reg); axes[1].plot(ks, sv, marker="o", label=reg)
+        for ax, yl in zip(axes, ("SGM time (s)", "share solved")):
+            ax.set_xscale("log"); ax.set_xticks([k for k, _ in curve]); ax.set_xticklabels([k for k, _ in curve])
+            ax.set_xlabel("dual iterations per node (R0, no cuts)"); ax.set_ylabel(yl); ax.grid(alpha=.3)
+        axes[0].set_yscale("log"); axes[1].set_ylim(0, 1.05); axes[1].legend(fontsize=8)
+        fig.suptitle("Dual budget per node (fresh instances)")
+        for ext in ("pdf", "png"):
+            fig.savefig(os.path.join(out, f"F3_budget_curve.{ext}"), bbox_inches="tight", dpi=200)
+        plt.close(fig)
+        made.append("F3_budget_curve.pdf/png")
+    return made
+
+
 # ----------------------------------------------------------------- tables
 def main():
     ap = argparse.ArgumentParser()
@@ -366,6 +456,110 @@ def main():
                          "other": int(len(g) - vc.get("optimal", 0) - vc.get("timeout", 0) - vc.get("memory", 0))})
     if rows:
         sections.append(write_table(out, "T7_outcomes", "Run outcomes per family", pd.DataFrame(rows)))
+
+    # ---- T8: dual budget / robustness in every core cell ---------------------
+    order = ["A", "B", "BL", "D", "C", "H", "L", "W"]
+    cfg8 = [C("R0"), C("R2"), C("R5"), C("R0", variant="it20")]
+    seen, rows = set(), []
+    for f in order:
+        for c, _, cf in fams.get(f, []):
+            cid = c["id"]
+            if cid in seen or not all(present(cid, x) for x in cfg8):
+                continue
+            seen.add(cid)
+            row = {"family": f, "cell": cell_label(c)}
+            for x in cfg8:
+                g = df[(df.cell_id == cid) & (df.config_id == x)]
+                mem = int(g.status.eq("memory").sum())
+                row[x] = (f"{int(g.solved.sum())}/{len(g)} ({fmt_num(AF.sgm(g.capped_time, AF.SHIFT_T))} s)"
+                          + (f", {mem} mem" if mem else ""))
+            rows.append(row)
+    if rows:
+        sections.append(write_table(
+            out, "T8_regimes", "Dual budget and robustness: solved / instances (SGM time) in every cell",
+            pd.DataFrame(rows), "R0/R2/R5 use 5 dual iterations per node (cut rungs add a cut phase); "
+            "R0-rel-dw-it20 uses 20 and no cuts.  'mem' = runs stopped at the memory limit."))
+
+    # ---- T9: channels and interactions (headline cell) ------------------------
+    if head is not None:
+        H = df[df.cell_id == head["id"]]
+        specs = [("probe channel: R0→R5 under reliability vs most-fractional",
+                  (C("R0"), C("R5")), (C("R0", "mf"), C("R5", "mf"))),
+                 ("primal channel: R0→R5 as run vs with UB = z* from the start",
+                  (C("R0"), C("R5")), (C("R0", variant="cutoff"), C("R5", variant="cutoff"))),
+                 ("exact cut dual: its effect at R5 vs at R2",
+                  (C("R5", variant="noexact"), C("R5")), (C("R2", variant="noexact"), C("R2"))),
+                 ("RC fixing: its effect at R5 vs at R0",
+                  (C("R5", variant="norc"), C("R5")), (C("R0", variant="norc"), C("R0")))]
+        rows = []
+        for label, (a1, b1), (a2, b2) in specs:
+            if not all(present(head["id"], x) for x in (a1, b1, a2, b2)):
+                continue
+            for metric, mname in (("nodes", "nodes"), ("capped_time", "time")):
+                r = AF.interaction(H, a1, b1, H, a2, b2, metric, a.boot, rng)
+                if r.get("n"):
+                    rows.append({"contrast": label, "metric": mname, "instances": r["n"],
+                                 "ratio of ratios [95% CI]": ratio_ci(r["ratio_of_ratios"], r["ci_lo"], r["ci_hi"]),
+                                 "p": fmt_num(r["p"])})
+        if rows:
+            sections.append(write_table(out, "T9_channels", "Channels and interactions (headline cell)",
+                                        pd.DataFrame(rows), "1 = no interaction; < 1: the first ratio is the "
+                                        "stronger improvement."))
+
+    # ---- T10: remaining gaps of unsolved runs --------------------------------------
+    rows = []
+    for f in list(FS.FAMILY_INFO):
+        path = os.path.join(root, "tables", f"{f}_results.csv")
+        if not os.path.exists(path):
+            continue
+        g = pd.read_csv(path)
+        un = g[g.status.isin(["timeout", "memory"])].copy()
+        if un.empty:
+            continue
+        un["gap_pct"] = 100.0 * (un.obj - un.final_lb) / un.obj
+        for cfg, u in un.groupby("config_id"):
+            rows.append({"family": f, "configuration": cfg, "unsolved": len(u),
+                         "of which memory": int(u.status.eq("memory").sum()),
+                         "median final gap (%)": fmt_num(u.gap_pct.median()),
+                         "max final gap (%)": fmt_num(u.gap_pct.max())})
+    if rows:
+        sections.append(write_table(out, "T10_unsolved_gaps", "Unsolved runs: remaining optimality gap",
+                                    pd.DataFrame(rows), "Gap = 100 (incumbent - lower bound) / incumbent at "
+                                    "the time or memory limit; '–' where no bound was available."))
+
+    # ---- facts: calibration and validation ----------------------------------------
+    facts = []
+    fb = os.path.join(root, "frozen", "F_beta.json")
+    if os.path.exists(fb):
+        import json
+        j = json.load(open(fb))
+        for k in ("F1", "F2"):
+            if k in j:
+                facts.append(f"- Calibration {k}: beta = {j[k]['beta']} (knob {j[k]['knob']}); rule: "
+                             f"{j[k]['reason']}.")
+    vr = os.path.join(root, "validation_report.json")
+    if os.path.exists(vr):
+        import json
+        v = json.load(open(vr))
+        cnt = v.get("counts", {})
+        facts.append(f"- Validation (brute force, n = 7-8, {len(v.get('instances', []))} instances): "
+                     f"{cnt.get('lr_runs', 0)} LR-BnB runs and {cnt.get('grb_runs', 0)} Gurobi runs agree "
+                     f"with the optimum; {cnt.get('cuts_checked', 0)} generated cuts "
+                     f"({cnt.get('probe_cut_events', 0)} separation events inside probes) checked against "
+                     f"{cnt.get('tree_checks', 0)} feasible trees; failures: {len(v.get('failures', []))}.")
+    if facts:
+        sections.append("### Facts for the text\n\n" + "\n".join(facts) + "\n")
+
+    # ---- figures -------------------------------------------------------------------
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        figs = make_figures(df, fams, cellinfo, present, out, TL, plt)
+        if figs:
+            sections.append("### Figures\n\n" + "\n".join(f"- `{x}`" for x in figs) + "\n")
+    except ImportError:
+        print("matplotlib not available: figures skipped")
 
     with open(os.path.join(out, "paper_summary.md"), "w") as f:
         f.write("# Paper tables\n\n" + "\n".join(sections))

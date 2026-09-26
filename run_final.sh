@@ -7,6 +7,7 @@
 #   bash run_final.sh smoke        full pipeline on small graphs (~30-60 min)
 #   bash run_final.sh final        the whole final suite, stage by stage
 #   bash run_final.sh optional     optional families (O1, O2, GLAZY)
+#   bash run_final.sh confirm      confirmation family X on fresh instances
 #   bash run_final.sh status       progress per family
 #   bash run_final.sh report       collect + checks + analysis
 #
@@ -108,6 +109,15 @@ PYEOF
   optional)
     $FS generate --family O1,O2,GLAZY --jobs "$GEN_JOBS"
     $FS run --family O1,O2,GLAZY --jobs "$JOBS" --mem-budget "$MEM" ;;
+  confirm)
+    # Confirmation family X on fresh instances (after the core suite).
+    $FS generate --family X --jobs "$GEN_JOBS"
+    $FS run --family X --jobs "$JOBS" --mem-budget "$MEM"
+    $FS collect --family X || echo "!! collect reported integrity problems (see above)"
+    rc=0
+    $PY smoke_check.py --root "$ROOT" --profile final --family X || rc=$?
+    $PY analyze_final.py --root "$ROOT" --profile final --family X
+    exit "$rc" ;;
   status)
     $FS status --family all ;;
   report)

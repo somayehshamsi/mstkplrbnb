@@ -103,6 +103,13 @@ LR-BnB checks still run).
 * **BL** loose budgets beta 0.50, 0.70 on exactly B's graphs (n = 300,
   d = 0.05 / 0.10 / 0.20): with B one budget sweep from 0.10 to 0.70.
 * optional **O1, O2, GLAZY**.
+* **X** confirmation, added after the core results, on FRESH instances (seed
+  groups never used elsewhere): R5 as designed, R0 with 20 / 40 / 80 dual
+  iterations per node, and R2 / R5 with max_iter 20 (80 iterations per node
+  including the cut phase, so R0-it80 is their equal-effort control).  Cells:
+  headline; loose budgets (d 0.10 / 0.20, beta 0.70); complete graphs n 200 /
+  300 at beta 0.5; degree-150 graphs n 500 / 1000 at beta 0.5; n 2000 sparse.
+  `bash run_final.sh confirm`.
 
 Coverage: n from 200 to 8000; average degree from 15 to complete (up to
 150 000 edges); beta from 0.08 to 0.70; correlation from +0.5 to -0.9.

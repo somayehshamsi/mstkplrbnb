@@ -19,13 +19,15 @@ underlying CSVs.  Definitions (declared before any final run):
                 Wilcoxon signed-rank p, Holm-adjusted within the family and
                 metric; exact McNemar p on solved/unsolved; time wins/ties/
                 losses with a +-5% tie band; "non-inferior" = upper CI < 1.10
-  root gap closed  (root bound - L*) / (z* - L*), L* the exact plain
-                Lagrangian bound, z* the agreed optimum
+  root gap      100 * (z* - root bound) / z*  (%), z* the agreed optimum;
+                reported next to 100 * (z* - L*) / z*, L* the exact plain
+                Lagrangian bound, and the share of runs whose root bound lies
+                below L* (the LR root is not a converged dual)
   interaction   ratio of paired ratios, e.g. [R5/R0 | reliability] /
                 [R5/R0 | most-fractional] on the same instances
 """
-#test
 import argparse
+import glob
 import math
 import os
 import sys
@@ -50,10 +52,10 @@ def prep(df, time_limit):
     df = df.copy()
     df["solved"] = df["status"].eq("optimal")
     df["capped_time"] = np.where(df["solved"], df["wall_time"].astype(float), time_limit)
-    den = df["zstar"].astype(float) - df["plain_lr_bound"].astype(float)
-    df["root_gap_closed"] = np.where(den > 1e-9, (df["root_lb"].astype(float)
-                                                  - df["plain_lr_bound"].astype(float)) / den,
-                                     np.nan)
+    z = df["zstar"].astype(float)
+    df["root_gap_pct"] = 100.0 * (z - df["root_lb"].astype(float)) / z
+    df["lstar_gap_pct"] = 100.0 * (z - df["plain_lr_bound"].astype(float)) / z
+    df["root_below_lstar"] = df["root_lb"].astype(float) < df["plain_lr_bound"].astype(float) - 1e-6
     for c in ("sep_time", "indicator_time", "probe_time"):
         if c in df:
             df[c.replace("_time", "_share")] = df[c].astype(float) / df["wall_time"].astype(float)
@@ -75,16 +77,18 @@ def summary(df, cfgs):
         rows.append({
             "config": c, "N": len(g), "solved": int(g["solved"].sum()),
             "timeouts": int(g["status"].eq("timeout").sum()),
-            "failures": int((~g["status"].isin(["optimal", "timeout"])).sum()),
+            "memory": int(g["status"].eq("memory").sum()),
+            "failures": int((~g["status"].isin(["optimal", "timeout", "memory"])).sum()),
             "sgm_time": sgm(g["capped_time"], SHIFT_T),
             "n_common": len(common),
             "sgm_nodes_common": sgm(cs["nodes"], SHIFT_N),
             "sgm_lr_iters_common": sgm(cs.get("lr_iterations", pd.Series(dtype=float)), SHIFT_N),
             "median_root_iters": float(g["root_lr_iterations"].median())
             if "root_lr_iterations" in g else np.nan,
-            "share_root_below_Lstar": float((g["root_gap_closed"] < 0).mean())
-            if g["root_gap_closed"].notna().any() else np.nan,
-            "median_root_gap_closed": float(g["root_gap_closed"].median()),
+            "share_root_below_Lstar": float(g.loc[g["root_lb"].notna(), "root_below_lstar"].mean())
+            if g["root_lb"].notna().any() else np.nan,
+            "median_root_gap_pct": float(g["root_gap_pct"].median()),
+            "median_lstar_gap_pct": float(g["lstar_gap_pct"].median()),
             "median_cuts": float(cs["cuts_separated"].median()) if "cuts_separated" in cs else np.nan,
             "median_sep_share": float(g["sep_share"].median()) if "sep_share" in g else np.nan,
             "median_probe_share": float(g["probe_share"].median()) if "probe_share" in g else np.nan,
@@ -93,6 +97,8 @@ def summary(df, cfgs):
             "median_pool": float(g["pool_median"].median()) if "pool_median" in g else np.nan,
             "median_singleton_share": float(g["pool_singleton_share"].median())
             if "pool_singleton_share" in g else np.nan,
+            "median_empty_pool_share": float(g["pool_empty_share"].median())
+            if "pool_empty_share" in g else np.nan,
         })
     return pd.DataFrame(rows)
 
@@ -213,6 +219,14 @@ def comparisons(family, cfgs):
         pairs += [(t(r), t(r, "avg")) for r in ("mf", "pc", "sbf", "rel", "hyb")]
         pairs += [(t("rel"), t(r)) for r in ("mf", "pc", "sbf", "hyb")]
         return pairs
+    if family == "X":
+        c = lambda r, v: FS.lr_config_id(r, "rel", variant=v)
+        return [(FS.lr_config_id("R5", "rel"), c("R5", "it20")),   # does the budget fix R5
+                (c("R0", "it20"), c("R0", "it40")), (c("R0", "it40"), c("R0", "it80")),
+                (c("R0", "it20"), c("R5", "it20")),                # cuts on top of the budget
+                (c("R0", "it80"), c("R2", "it20")),                # equal dual effort
+                (c("R0", "it80"), c("R5", "it20")),
+                (c("R2", "it20"), c("R5", "it20"))]                # strengthening, high budget
     if family == "AGRB":
         return [(g, FS.lr_config_id("R5", "rel")) for g in cfgs]
     return []
@@ -239,6 +253,14 @@ def main():
     os.makedirs(out, exist_ok=True)
     fams = FS.build_families(a.profile, root)
     loaded = {}
+    # Every table on disk, for paired comparisons whose baseline belongs to
+    # another family on the same cell (E's R2 / R5 live in A).
+    tables = [pd.read_csv(p) for p in sorted(glob.glob(os.path.join(root, "tables", "*_results.csv")))
+              if not os.path.basename(p).startswith(("core_", "all_"))
+              and "_all_results" not in os.path.basename(p)]
+    ALL = (prep(pd.concat(tables, ignore_index=True)
+                .drop_duplicates(["cell_id", "config_id", "idx"]), time_limit)
+           if tables else None)
     for fam in FS.parse_families(a.family):
         path = os.path.join(root, "tables", f"{fam}_results.csv")
         if not os.path.exists(path):
@@ -265,9 +287,11 @@ def main():
             summ.insert(0, "cell", cell["id"])
             summ.to_csv(os.path.join(out, f"{fam}_summary_{cell['id']}.csv"), index=False)
             md.append(fmt(summ.drop(columns=["cell"])) + "\n")
+            pool = ALL[ALL["cell_id"] == cell["id"]] if ALL is not None else cdf
+            have = set(pool["config_id"])
             for x, y in comparisons(fam, cfgs):
-                if x in cfgs and y in cfgs:
-                    row = paired(cdf, x, y, a.boot, rng)
+                if (x in cfgs or y in cfgs) and x in have and y in have:
+                    row = paired(pool, x, y, a.boot, rng)
                     row["cell"] = cell["id"]
                     pair_rows.append(row)
         if pair_rows:

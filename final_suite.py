@@ -298,6 +298,10 @@ VARIANTS = {
     # only at the root).  rit40 matches R1's budget, it20 matches R2-R5's,
     # so each ladder step can be read at equal dual effort.
     "rit40": {"root_max_iter": 40},
+    # Confirmation family X: larger per-node dual budgets.  A cut rung with
+    # max_iter = 20 runs 20 + 3 * 20 = 80 iterations per node (cut phase),
+    # so it80 is the equal-effort no-cut control for R2/R5-it20.
+    "it40": {"max_iter": 40}, "it80": {"max_iter": 80},
 }
 GRB_FORMS = ("SCF", "DMCF", "DCUT", "CUTSETLAZY")
 
@@ -362,6 +366,7 @@ FAMILY_INFO = {
     "O1": ("optional", "R0 with 10 / 20 dual iterations (it20 is also in A; adds it10)."),
     "O2": ("optional", "Strengthening levels with root-only separation (ladder-order check)."),
     "GLAZY": ("optional", "Lazy undirected cut-set (continuity with the previous version)."),
+    "X": ("confirm", "Confirmation on fresh instances: dual budget 20/40/80 per node, cuts on top."),
 }
 CORE_FAMILIES = [f for f, (kind, _) in FAMILY_INFO.items() if kind == "core"]
 
@@ -475,6 +480,26 @@ def build_families(profile, root):
         for beta in (0.50, 0.70):
             fam["BL"].append((make_cell(profile, 300, d, beta, 0.0, group),
                               list(range(_count(profile, 20))), rel(LADDER5) + R0M20))
+    # Confirmation on FRESH instances (seed groups never used above), decided
+    # after the core results: does the larger per-node dual budget carry over,
+    # and do the cuts add value on top of it?
+    XCFG = [lr_config_id("R5", "rel"),                        # as designed
+            lr_config_id("R0", "rel", variant="it20"),        # budget that worked
+            lr_config_id("R0", "rel", variant="it40"),
+            lr_config_id("R0", "rel", variant="it80"),        # equal effort to R2/R5-it20
+            lr_config_id("R2", "rel", variant="it20"),        # literature cuts + budget
+            lr_config_id("R5", "rel", variant="it20")]        # your cuts + budget
+    fam["X"] = (
+        [(make_cell(profile, 300, 0.05, 0.15, 0.0, "confirm_core"),
+          list(range(_count(profile, 25))), XCFG)]
+        + [(make_cell(profile, 300, d, 0.70, 0.0, f"confirm_grid_d{d:.2f}"),
+            list(range(_count(profile, 20))), XCFG) for d in (0.10, 0.20)]
+        + [(make_cell(profile, n, 1.0, 0.50, 0.0, f"confirm_complete_n{n}", complete=True),
+            list(range(_count(profile, 10))), XCFG) for n in (200, 300)]
+        + [(make_cell(profile, n, round(150 / (n - 1), 6), 0.50, 0.0, f"confirm_wide_n{n}_deg150"),
+            list(range(_count(profile, 10))), XCFG) for n in (500, 1000)]
+        + [(make_cell(profile, 2000, round(DEG / 1999, 6), 0.15, 0.0, "confirm_large_n2000"),
+            list(range(_count(profile, 10))), XCFG)])
     fam["O1"] = [(core(0.15), list(range(_count(profile, 50))),
                   [lr_config_id("R0", "rel", variant="it10"),
                    lr_config_id("R0", "rel", variant="it20")])]

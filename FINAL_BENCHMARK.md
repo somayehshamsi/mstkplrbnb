@@ -110,6 +110,13 @@ LR-BnB checks still run).
   headline; loose budgets (d 0.10 / 0.20, beta 0.70); complete graphs n 200 /
   300 at beta 0.5; degree-150 graphs n 500 / 1000 at beta 0.5; n 2000 sparse.
   `bash run_final.sh confirm`.
+* **XB** budget curve on exactly X's instances: R0 with 5 (default) and 10
+  iterations per node, completing 5 / 10 / 20 / 40 / 80.  `bash run_final.sh curve`.
+
+Paper tables: `bash run_final.sh paper` writes ROOT/paper/ (Markdown, LaTeX,
+CSV): pooled confirmation tests over all fresh instances (stratified
+bootstrap, Holm), the budget curve, the headline ladder, your cuts vs the
+literature in every cell, LR-BnB vs Gurobi, branching, components, outcomes.
 
 Coverage: n from 200 to 8000; average degree from 15 to complete (up to
 150 000 edges); beta from 0.08 to 0.70; correlation from +0.5 to -0.9.

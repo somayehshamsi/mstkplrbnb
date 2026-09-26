@@ -367,6 +367,7 @@ FAMILY_INFO = {
     "O2": ("optional", "Strengthening levels with root-only separation (ladder-order check)."),
     "GLAZY": ("optional", "Lazy undirected cut-set (continuity with the previous version)."),
     "X": ("confirm", "Confirmation on fresh instances: dual budget 20/40/80 per node, cuts on top."),
+    "XB": ("confirm", "Budget curve on X's fresh instances: R0 with 5 and 10 iterations per node."),
 }
 CORE_FAMILIES = [f for f, (kind, _) in FAMILY_INFO.items() if kind == "core"]
 
@@ -489,17 +490,22 @@ def build_families(profile, root):
             lr_config_id("R0", "rel", variant="it80"),        # equal effort to R2/R5-it20
             lr_config_id("R2", "rel", variant="it20"),        # literature cuts + budget
             lr_config_id("R5", "rel", variant="it20")]        # your cuts + budget
-    fam["X"] = (
+    xcells = (
         [(make_cell(profile, 300, 0.05, 0.15, 0.0, "confirm_core"),
-          list(range(_count(profile, 25))), XCFG)]
+          list(range(_count(profile, 25))))]
         + [(make_cell(profile, 300, d, 0.70, 0.0, f"confirm_grid_d{d:.2f}"),
-            list(range(_count(profile, 20))), XCFG) for d in (0.10, 0.20)]
+            list(range(_count(profile, 20)))) for d in (0.10, 0.20)]
         + [(make_cell(profile, n, 1.0, 0.50, 0.0, f"confirm_complete_n{n}", complete=True),
-            list(range(_count(profile, 10))), XCFG) for n in (200, 300)]
+            list(range(_count(profile, 10)))) for n in (200, 300)]
         + [(make_cell(profile, n, round(150 / (n - 1), 6), 0.50, 0.0, f"confirm_wide_n{n}_deg150"),
-            list(range(_count(profile, 10))), XCFG) for n in (500, 1000)]
+            list(range(_count(profile, 10)))) for n in (500, 1000)]
         + [(make_cell(profile, 2000, round(DEG / 1999, 6), 0.15, 0.0, "confirm_large_n2000"),
-            list(range(_count(profile, 10))), XCFG)])
+            list(range(_count(profile, 10))))])
+    fam["X"] = [(c, i, XCFG) for c, i in xcells]
+    # Budget curve completed on the SAME fresh instances: 5 (default) and 10
+    # dual iterations per node, next to X's 20 / 40 / 80.
+    fam["XB"] = [(c, i, [lr_config_id("R0", "rel"), lr_config_id("R0", "rel", variant="it10")])
+                 for c, i in xcells]
     fam["O1"] = [(core(0.15), list(range(_count(profile, 50))),
                   [lr_config_id("R0", "rel", variant="it10"),
                    lr_config_id("R0", "rel", variant="it20")])]

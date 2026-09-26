@@ -8,6 +8,8 @@
 #   bash run_final.sh final        the whole final suite, stage by stage
 #   bash run_final.sh optional     optional families (O1, O2, GLAZY)
 #   bash run_final.sh confirm      confirmation family X on fresh instances
+#   bash run_final.sh curve        budget curve (5 / 10 iterations) on X's instances
+#   bash run_final.sh paper        pooled tests + paper-ready tables
 #   bash run_final.sh status       progress per family
 #   bash run_final.sh report       collect + checks + analysis
 #
@@ -118,6 +120,17 @@ PYEOF
     $PY smoke_check.py --root "$ROOT" --profile final --family X || rc=$?
     $PY analyze_final.py --root "$ROOT" --profile final --family X
     exit "$rc" ;;
+  curve)
+    # Budget curve (R0 with 5 and 10 iterations per node) on X's fresh instances.
+    $FS generate --family XB --jobs "$GEN_JOBS"
+    $FS run --family XB --jobs "$JOBS" --mem-budget "$MEM"
+    $FS collect --family XB || echo "!! collect reported integrity problems (see above)"
+    rc=0
+    $PY smoke_check.py --root "$ROOT" --profile final --family XB || rc=$?
+    exit "$rc" ;;
+  paper)
+    # Pooled confirmation tests and paper-ready tables (reads tables/ only).
+    $PY paper_tables.py --root "$ROOT" --profile final ;;
   status)
     $FS status --family all ;;
   report)

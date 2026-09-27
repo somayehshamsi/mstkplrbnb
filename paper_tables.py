@@ -94,6 +94,9 @@ def write_table(out, name, title, df, note=""):
         x = str(x).replace("\\", r"\textbackslash{}")
         for a, b in (("&", r"\&"), ("%", r"\%"), ("_", r"\_"), ("#", r"\#")):
             x = x.replace(a, b)
+        # Brackets in braces: a row starting with "[" (e.g. "[L] n=1000") would
+        # otherwise be read as the optional argument of the previous "\\".
+        x = x.replace("[", "{[}").replace("]", "{]}")
         for a, b in symbols.items():
             x = x.replace(a, b)
         return x

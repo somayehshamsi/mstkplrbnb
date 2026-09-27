@@ -88,7 +88,7 @@ def write_table(out, name, title, df, note=""):
     df.to_csv(os.path.join(out, f"{name}.csv"), index=False)
     symbols = {"β": r"$\beta$", "ρ": r"$\rho$", "λ": r"$\lambda$", "τ": r"$\tau$",
                "→": r"$\to$", "≈": r"$\approx$", "×": r"$\times$", "≥": r"$\geq$",
-               "≤": r"$\leq$", "±": r"$\pm$", "–": "--"}
+               "≤": r"$\leq$", "±": r"$\pm$", "–": "--", "<": r"$<$", ">": r"$>$"}
 
     def esc(x):
         x = str(x).replace("\\", r"\textbackslash{}")
@@ -181,7 +181,7 @@ def pooled(df, a, b, cells, B, rng):
 def make_figures(df, fams, cellinfo, present, out, TL, plt):
     made = []
     style = {C("R0"): ("R0 (5 it.)", "tab:gray", "-"), C("R2"): ("R2 literature cuts", "tab:blue", "-"),
-             C("R5"): ("R5 your cuts", "tab:red", "-"),
+             C("R5"): ("R5 strengthened cuts", "tab:red", "-"),
              C("R0", variant="it20"): ("R0, 20 it./node", "tab:green", "-"),
              "GRB-SCF": ("Gurobi SCF", "tab:purple", "--"), "GRB-DMCF": ("Gurobi DMCF", "tab:brown", "--"),
              "GRB-DCUT": ("Gurobi DCUT", "black", "--")}
@@ -267,6 +267,20 @@ def make_figures(df, fams, cellinfo, present, out, TL, plt):
     return made
 
 
+def common_rows(df, cid, cfgs, idxs=None):
+    """Rows of cell `cid` for `cfgs`, restricted to the instances that every
+    listed configuration has (and to `idxs` if given), so that all numbers in
+    one table row describe the same instances."""
+    sub = df[(df.cell_id == cid) & df.config_id.isin(cfgs)]
+    if idxs is not None:
+        sub = sub[sub.idx.isin(set(idxs))]
+    have = [set(sub[sub.config_id == c].idx) for c in cfgs if (sub.config_id == c).any()]
+    if not have:
+        return sub
+    common = set.intersection(*have)
+    return sub[sub.idx.isin(common)]
+
+
 # ----------------------------------------------------------------- tables
 def main():
     ap = argparse.ArgumentParser()
@@ -293,7 +307,7 @@ def main():
                    "sparse / loose": [c for c in xcells if cellinfo[c]["density"] < 1.0],
                    "complete graphs": [c for c in xcells if cellinfo[c]["density"] >= 1.0]}
         declared = [
-            ("your cuts vs literature cuts, same budget", C("R2", variant="it20"), C("R5", variant="it20")),
+            ("strengthened vs literature cuts, same budget", C("R2", variant="it20"), C("R5", variant="it20")),
             ("cuts vs same effort spent on the dual (80 it./node)", C("R0", variant="it80"), C("R5", variant="it20")),
             ("literature cuts vs same effort on the dual", C("R0", variant="it80"), C("R2", variant="it20")),
             ("cuts on top of the fastest cut-free setting", C("R0", variant="it20"), C("R5", variant="it20")),
@@ -419,7 +433,7 @@ def main():
                           "node ratio R5/R2 [95% CI]": [ratio_ci(*v) for v in zip(R.node_ratio, R.node_ci_lo, R.node_ci_hi)],
                           "p (Holm)": [fmt_num(v) for v in R.node_p_holm],
                           "time ratio R5/R2 [95% CI]": [ratio_ci(*v) for v in zip(R.time_ratio, R.time_ci_lo, R.time_ci_hi)]})
-        sections.append(write_table(out, "T2_strengthening", "Your strengthened cuts (R5) vs literature cuts (R2), every cell", T,
+        sections.append(write_table(out, "T2_strengthening", "Strengthened cuts (R5) vs literature cuts (R2), every cell", T,
                                     "Paired, same dual budget; nodes on instances solved by both; cells with 0 cuts "
                                     "separated show no effect by construction."))
 
@@ -430,8 +444,9 @@ def main():
         if not any(present(cid, g) for g in cfgs[2:]):
             continue
         row = {"cell": cell_label(info)}
+        sub3 = common_rows(df, cid, [c for c in cfgs if present(cid, c)])
         for c in cfgs:
-            g = df[(df.cell_id == cid) & (df.config_id == c)]
+            g = sub3[sub3.config_id == c]
             row[c] = (f"{int(g.solved.sum())}/{len(g)} ({fmt_num(AF.sgm(g.capped_time, AF.SHIFT_T))} s)"
                       if len(g) else "–")
         rows.append(row)
@@ -444,7 +459,8 @@ def main():
     for c, idxs, cf in fams.get("F", []):
         if not (df.cell_id == c["id"]).any():
             continue
-        S = AF.summary(df[df.cell_id == c["id"]], [x for x in cf if present(c["id"], x)])
+        cf_here = [x for x in cf if present(c["id"], x)]
+        S = AF.summary(common_rows(df, c["id"], cf_here, idxs), cf_here)
         for _, s in S.iterrows():
             rows.append({"cell": cell_label(c), "rule": s.config, "solved": f"{s.solved}/{s.N}",
                          "SGM time (s)": fmt_num(s.sgm_time), "SGM nodes": fmt_num(s.sgm_nodes_common),
@@ -499,8 +515,9 @@ def main():
                 continue
             seen.add(cid)
             row = {"family": f, "cell": cell_label(c)}
+            sub8 = common_rows(df, cid, cfg8)
             for x in cfg8:
-                g = df[(df.cell_id == cid) & (df.config_id == x)]
+                g = sub8[sub8.config_id == x]
                 mem = int(g.status.eq("memory").sum())
                 row[x] = (f"{int(g.solved.sum())}/{len(g)} ({fmt_num(AF.sgm(g.capped_time, AF.SHIFT_T))} s)"
                           + (f", {mem} mem" if mem else ""))

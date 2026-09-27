@@ -215,16 +215,21 @@ def make_figures(df, fams, cellinfo, present, out, TL, plt):
     # F2: scaling at constant average degree (families C and L)
     pts = []
     for f in ("C", "L"):
-        for c, _, _ in fams.get(f, []):
+        for c, idxs, _ in fams.get(f, []):
             if (df.cell_id == c["id"]).any():
-                pts.append(c)
+                pts.append((c, idxs))
     if pts:
-        pts = sorted({c["n"]: c for c in pts}.values(), key=lambda c: c["n"])
+        pts = sorted({c["n"]: (c, i) for c, i in pts}.values(), key=lambda ci: ci[0]["n"])
         fig, ax = plt.subplots(figsize=(6, 4))
-        for cfg in [C("R0"), C("R2"), C("R5"), C("R0", variant="it20"), "GRB-SCF", "GRB-DCUT"]:
+        plotted = [C("R0"), C("R2"), C("R5"), C("R0", variant="it20"), "GRB-SCF", "GRB-DCUT"]
+        # each point: the family's own instances that every plotted configuration has
+        subs = {c["id"]: common_rows(df, c["id"], [x for x in plotted if present(c["id"], x)], i)
+                for c, i in pts}
+        pts = [c for c, _ in pts]
+        for cfg in plotted:
             xs, ys = [], []
             for c in pts:
-                g = df[(df.cell_id == c["id"]) & (df.config_id == cfg)]
+                g = subs[c["id"]][subs[c["id"]].config_id == cfg]
                 if len(g):
                     xs.append(c["n"]); ys.append(AF.sgm(g.capped_time, AF.SHIFT_T))
             if xs:

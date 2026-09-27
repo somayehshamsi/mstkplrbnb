@@ -286,6 +286,207 @@ def common_rows(df, cid, cfgs, idxs=None):
     return sub[sub.idx.isin(common)]
 
 
+# ----------------------------------------------------------------- main-text tables
+def find_cell(cellinfo, group, beta, knob=0.0):
+    for c in cellinfo.values():
+        if c["group"] == group and abs(c["beta"] - beta) < 1e-9 and abs(c["knob"] - knob) < 1e-6:
+            return c
+    return None
+
+
+def solved_sgm(g):
+    mem = int(g.status.eq("memory").sum())
+    txt = f"{int(g.solved.sum())}/{len(g)} ({fmt_num(AF.sgm(g.capped_time, AF.SHIFT_T))} s)"
+    return txt + (f", {mem} mem" if mem else "")
+
+
+def main_text_tables(df, fams, cellinfo, present, out, a, rng):
+    """Compact tables for the main text (the full tables go to the appendix)."""
+    sec = []
+    present_any = lambda c: c is not None and (df.cell_id == c["id"]).any()
+
+    # M1: LR-BnB vs the MIP formulations on representative cells
+    specs = [("headline: $n=300$, deg 15, β=0.15", "core", 0.15, 0.0),
+             ("correlated: $n=300$, ρ=-0.9", "core", 0.15, -0.674),
+             ("sparse: $n=800$, deg 15", "scale_n800", 0.15, 0.0),
+             ("sparse: $n=2000$, deg 15", "large_n2000", 0.15, 0.0),
+             ("sparse: $n=4000$, deg 15", "large_n4000", 0.15, 0.0),
+             ("dense: $n=2000$, deg 150, β=0.3", "wide_n2000_deg150", 0.30, 0.0),
+             ("complete: $n=500$, β=0.15", "complete_n500", 0.15, 0.0),
+             ("complete: $n=500$, β=0.5", "complete_n500", 0.50, 0.0)]
+    cfgs = [C("R5"), C("R0", variant="it20"), "GRB-SCF", "GRB-DMCF", "GRB-DCUT"]
+    names = {C("R5"): "LR-BnB R5 (5 it.)", C("R0", variant="it20"): "LR-BnB R0 (20 it.)",
+             "GRB-SCF": "Gurobi SCF", "GRB-DMCF": "Gurobi DMCF", "GRB-DCUT": "Gurobi DCUT"}
+    rows = []
+    for label, grp, beta, knob in specs:
+        c = find_cell(cellinfo, grp, beta, knob)
+        if not present_any(c):
+            continue
+        sub = common_rows(df, c["id"], [x for x in cfgs if present(c["id"], x)])
+        row = {"instances": label}
+        for x in cfgs:
+            g = sub[sub.config_id == x]
+            row[names[x]] = solved_sgm(g) if len(g) else "–"
+        rows.append(row)
+    if rows:
+        sec.append(write_table(out, "M1_mip", "LR-BnB and the MIP formulations: solved / instances (SGM time)",
+                               pd.DataFrame(rows), "Representative cells; every entry of a row uses the same "
+                               "instances.  Time limit 1800 s; 'mem' = runs stopped at the memory limit; DMCF was "
+                               "not run where its model would exceed $10^7$ variables.  All cells: appendix."))
+
+    # M2a: matched controls on the headline cell
+    head = find_cell(cellinfo, "core", 0.15, 0.0)
+    if present_any(head):
+        order = [(C("R0"), "R0: no cuts, 5 it./node"), (C("R0", variant="rit40"), "R0-rit40: R1's root budget"),
+                 (C("R1"), "R1: literature cuts, root only"), (C("R0", variant="it20"), "R0-it20: 20 it./node"),
+                 (C("R2"), "R2: literature cuts, node-local"), (C("R5"), "R5: strengthened cuts")]
+        order = [(c, l) for c, l in order if present(head["id"], c)]
+        H = common_rows(df, head["id"], [c for c, _ in order])
+        S = AF.summary(H, [c for c, _ in order]).set_index("config")
+        rows = []
+        for c, l in order:
+            g = H[H.config_id == c]
+            ipn = float((g.lr_iterations.astype(float) / g.nodes.clip(lower=1).astype(float)).median())
+            rows.append({"configuration": l, "dual it. / node": fmt_num(ipn),
+                         "root it.": fmt_num(S.loc[c, "median_root_iters"]),
+                         "root gap (%)": fmt_num(S.loc[c, "median_root_gap_pct"]),
+                         "SGM nodes": fmt_num(S.loc[c, "sgm_nodes_common"]),
+                         "SGM time (s)": fmt_num(S.loc[c, "sgm_time"])})
+        sec.append(write_table(out, "M2a_controls", "Headline cell: cuts and dual effort", pd.DataFrame(rows),
+                               f"All {len(H) // max(1, len(order))} instances solved by every configuration; dual "
+                               "iterations per node include strong-branching probes; root gap relative to the optimum."))
+
+    # M2b: regimes where five dual iterations per node fail
+    specs = [("complete, $n=300$, β=0.5", "complete_n300", 0.50, 0.0),
+             ("complete, $n=500$, β=0.5", "complete_n500", 0.50, 0.0),
+             ("deg 150, $n=1000$, β=0.5", "wide_n1000_deg150", 0.50, 0.0),
+             ("deg 150, $n=2000$, β=0.3", "wide_n2000_deg150", 0.30, 0.0),
+             ("deg 60, $n=300$, β=0.7", "grid_d0.20", 0.70, 0.0),
+             ("deg 15, $n=300$, ρ=-0.5", "core", 0.15, -0.366)]
+    cfg8 = [C("R0"), C("R2"), C("R5"), C("R0", variant="it20")]
+    rows = []
+    for label, grp, beta, knob in specs:
+        c = find_cell(cellinfo, grp, beta, knob)
+        if not present_any(c) or not all(present(c["id"], x) for x in cfg8):
+            continue
+        sub = common_rows(df, c["id"], cfg8)
+        rows.append({"instances": label, **{x: solved_sgm(sub[sub.config_id == x]) for x in cfg8}})
+    if rows:
+        sec.append(write_table(out, "M2b_regimes", "Where five dual iterations per node fail: solved / instances "
+                               "(SGM time)", pd.DataFrame(rows), "R0, R2, R5: 5 dual iterations per node (cut rungs "
+                               "add a cut phase when covers are found); R0-rel-dw-it20: 20 and no cuts.  All cells: "
+                               "appendix."))
+
+    # M3: strengthened cuts -- headline steps and fresh pooled comparisons
+    rows = []
+    if present_any(head):
+        Hd = df[df.cell_id == head["id"]]
+        for label, x, y in [("Lemma 1 (R2 → R3)", C("R2"), C("R3")), ("full strengthening (R3 → R4)", C("R3"), C("R4")),
+                            ("rank lifting (R4 → R5)", C("R4"), C("R5")),
+                            ("all strengthening (R2 → R5)", C("R2"), C("R5")),
+                            ("R5 vs budget-matched cut-free (R0-it20 → R5)", C("R0", variant="it20"), C("R5"))]:
+            if present(head["id"], x) and present(head["id"], y):
+                r = AF.paired(Hd, x, y, a.boot, rng)
+                rows.append({"setting": "headline, 5 it./node", "comparison": label, "n": r["n"],
+                             "nr": r["node_ratio"], "nlo": r["node_ci_lo"], "nhi": r["node_ci_hi"], "np": r["node_p"],
+                             "tr": r["time_ratio"], "tlo": r["time_ci_lo"], "thi": r["time_ci_hi"], "tp": r["time_p"]})
+    xcells = [c["id"] for c, _, _ in fams.get("X", []) if (df.cell_id == c["id"]).any()]
+    if xcells:
+        for label, x, y in [("strengthened vs literature (R2 → R5)", C("R2", variant="it20"), C("R5", variant="it20")),
+                            ("cuts vs equal dual effort (R0-it80 → R5)", C("R0", variant="it80"), C("R5", variant="it20")),
+                            ("cuts on top of R0-it20 (R0-it20 → R5)", C("R0", variant="it20"), C("R5", variant="it20"))]:
+            r = pooled(df, x, y, xcells, a.boot, rng)
+            if r:
+                rows.append({"setting": "fresh, 20 it./node", "comparison": label, "n": r["n"],
+                             "nr": r["node_ratio"], "nlo": r["node_lo"], "nhi": r["node_hi"], "np": r["node_p"],
+                             "tr": r["time_ratio"], "tlo": r["time_lo"], "thi": r["time_hi"], "tp": r["time_p"]})
+    if rows:
+        R = pd.DataFrame(rows)
+        R["np_h"], R["tp_h"] = AF.holm(R.np.fillna(1.0)), AF.holm(R.tp.fillna(1.0))
+        T = pd.DataFrame({"setting": R.setting, "comparison (a → b)": R.comparison, "instances": R.n,
+                          "node ratio [95% CI]": [ratio_ci(*v) for v in zip(R.nr, R.nlo, R.nhi)],
+                          "p": [fmt_num(v) for v in R.np_h],
+                          "time ratio [95% CI]": [ratio_ci(*v) for v in zip(R.tr, R.tlo, R.thi)],
+                          "p ": [fmt_num(v) for v in R.tp_h]})
+        sec.append(write_table(out, "M3_cuts", "Strengthened cover cuts: node and time ratios", T,
+                               "Ratio b/a of geometric means over paired instances (< 1: b better); fresh rows pooled "
+                               "over the 115 confirmation instances (bootstrap stratified by cell); Wilcoxon p, Holm "
+                               "across the rows."))
+
+    # M4: branching, pooled over the three cells of family F
+    fcells = [c["id"] for c, _, _ in fams.get("F", []) if (df.cell_id == c["id"]).any()]
+    ref = FS.lr_config_id("R5", "rmst")
+    if fcells and any(present(c, ref) for c in fcells):
+        rules = [("Random (MST)", "rmst"), ("Strong branching (MST)", "sbmst"), ("Random (frac.)", "rfrac"),
+                 ("Most fractional", "mf"), ("Pseudo-cost", "pc"), ("Strong branching (frac.)", "sbf"),
+                 ("Reliability", "rel"), ("Hybrid", "hyb")]
+        rows = []
+        for name, tag in rules:
+            row = {"rule": name}
+            for src, col in (("dw", "DW"), ("avg", "averaged")):
+                if not FS.RULES[tag][1] and src == "avg":
+                    row[f"{col}: nodes"] = row[f"{col}: time"] = "–"
+                    continue
+                cid_cfg = FS.lr_config_id("R5", tag, src) if FS.RULES[tag][1] else FS.lr_config_id("R5", tag)
+                if cid_cfg == ref:
+                    row[f"{col}: nodes"] = row[f"{col}: time"] = "1 (reference)"
+                    continue
+                r = pooled(df, ref, cid_cfg, fcells, a.boot, rng)
+                row[f"{col}: nodes"] = ratio_ci(r["node_ratio"], r["node_lo"], r["node_hi"]) if r else "–"
+                row[f"{col}: time"] = ratio_ci(r["time_ratio"], r["time_lo"], r["time_hi"]) if r else "–"
+            main_cfg = FS.lr_config_id("R5", tag, "dw") if FS.RULES[tag][1] else FS.lr_config_id("R5", tag)
+            g = df[df.cell_id.isin(fcells) & (df.config_id == main_cfg)]
+            row["probes / node"] = fmt_num(float((g.probes.astype(float) / g.nodes.clip(lower=1)).median()))
+            rows.append(row)
+        sec.append(write_table(out, "M4_branching", "Branching rules with R5 cuts: ratios to Random (MST)",
+                               pd.DataFrame(rows), "Pooled over the three branching cells (headline, β=0.08, "
+                               "ρ=-0.9; 130 instances), paired ratios to Random (MST) with bootstrap 95% CI "
+                               "stratified by cell; < 1: fewer nodes / less time.  DW: Dantzig-Wolfe indicator.  "
+                               "Per-cell results: appendix."))
+    return sec
+
+
+def forest_figure(R, out, plt):
+    R = R[R.node_ratio.notna()].copy()
+    if R.empty:
+        return False
+
+    def group(label):
+        if "(fresh)" in label:
+            return "fresh instances, 20 it./node"
+        for tag, name in (("[H]", "complete graphs"), ("[W]", "size×density×budget grid"),
+                          ("[L]", "large sparse"), ("[C]", "scaling"), ("[B]", "density×budget grid")):
+            if label.startswith(tag):
+                return name
+        return "$n=300$, degree 15"
+    R["group"] = R.cell.map(group)
+    R = R.sort_values("node_ratio").reset_index(drop=True)
+    colors = dict(zip(sorted(R.group.unique()), plt.rcParams["axes.prop_cycle"].by_key()["color"]))
+    fig, ax = plt.subplots(figsize=(6.2, 1.2 + 0.11 * len(R)))
+    for grp, g in R.groupby("group"):
+        lo = (g.node_ratio - g.node_ci_lo).clip(lower=0).fillna(0)
+        hi = (g.node_ci_hi - g.node_ratio).clip(lower=0).fillna(0)
+        ax.errorbar(g.node_ratio, g.index, xerr=[lo, hi], fmt="o", ms=3.5, lw=0.8, capsize=0,
+                    color=colors[grp], label=grp)
+    ax.axvline(1.0, color="k", lw=0.8, ls="--")
+    below = int((R.node_ratio < 1).sum())
+    ax.set_yticks([]); ax.set_xscale("log")
+    from matplotlib.ticker import FixedLocator, NullLocator, FormatStrFormatter
+    lo_x = max(0.3, float(np.nanmin(R.node_ci_lo.fillna(R.node_ratio))) * 0.95)
+    hi_x = min(3.0, float(np.nanmax(R.node_ci_hi.fillna(R.node_ratio))) * 1.05)
+    ticks = [t for t in (0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.2, 1.5, 2.0, 3.0) if lo_x <= t <= hi_x]
+    ax.set_xlim(lo_x, hi_x)
+    ax.xaxis.set_major_locator(FixedLocator(ticks)); ax.xaxis.set_minor_locator(NullLocator())
+    ax.xaxis.set_major_formatter(FormatStrFormatter("%g"))
+    ax.set_xlabel("node ratio, strengthened (R5) / literature (R2) cuts")
+    ax.set_title(f"Every cell with a defined ratio: {below} of {len(R)} below 1", fontsize=10)
+    ax.legend(fontsize=7, loc="upper left"); ax.grid(alpha=.3, axis="x")
+    for ext in ("pdf", "png"):
+        fig.savefig(os.path.join(out, f"F4_strengthening_cells.{ext}"), bbox_inches="tight", dpi=200)
+    plt.close(fig)
+    return True
+
+
 # ----------------------------------------------------------------- tables
 def main():
     ap = argparse.ArgumentParser()
@@ -422,6 +623,7 @@ def main():
                                         "Ratio b/a (< 1: b better); Holm across the rows of this table."))
 
     # ---- T2: your cuts vs literature cuts in every cell ----------------------
+    T2R = None
     rows = []
     for cid, info in cellinfo.items():
         for lit, own, budget in ((C("R2"), C("R5"), 5), (C("R2", variant="it20"), C("R5", variant="it20"), 20)):
@@ -433,6 +635,7 @@ def main():
     if rows:
         R = pd.DataFrame(rows).sort_values(["budget", "cell"])
         R["node_p_holm"] = AF.holm(R.node_p.fillna(1.0))
+        T2R = R.copy()
         T = pd.DataFrame({"cell": R.cell, "λ-iterations / node": R.budget, "instances": R.n,
                           "cuts (median, R5)": [fmt_num(v) for v in R["cuts (median)"]],
                           "node ratio R5/R2 [95% CI]": [ratio_ci(*v) for v in zip(R.node_ratio, R.node_ci_lo, R.node_ci_hi)],
@@ -608,6 +811,17 @@ def main():
                      f"{cnt.get('tree_checks', 0)} feasible trees; failures: {len(v.get('failures', []))}.")
     if facts:
         sections.append("### Facts for the text\n\n" + "\n".join(facts) + "\n")
+
+    # ---- main-text tables (M1-M4) and the cell-by-cell strengthening figure -------
+    sections += main_text_tables(df, fams, cellinfo, present, out, a, rng)
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        if T2R is not None and forest_figure(T2R, out, plt):
+            sections.append("### Figure F4\n\n- `F4_strengthening_cells.pdf/png`\n")
+    except ImportError:
+        pass
 
     # ---- figures -------------------------------------------------------------------
     try:

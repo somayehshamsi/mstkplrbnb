@@ -40,11 +40,14 @@ _SOLVER_KEYS = [
     ("lift_cuts", True), ("dual_seed", False), ("dw_harvest", 0),
     ("frac_top_k", 0), ("use_cover_cuts", False), ("max_iter", None),
     ("mu_init", 0.0), ("cut_phase_frac", 3.0), ("root_max_iter", None),
+    # REVISION: exact plain dual
+    ("exact_plain_dual", False), ("exact_plain_max_msts", 60),
 ]
 # Probes only need the cut-shaping ones.
 _PROBE_KEYS = ["cut_strengthening", "max_active_cuts", "max_cut_depth",
                "rank_lift", "exact_cut_dual", "lift_cuts", "dual_seed",
-               "use_cover_cuts", "cut_phase_frac"]
+               "use_cover_cuts", "cut_phase_frac",
+               "exact_plain_dual", "exact_plain_max_msts"]
 
 
 def _json_num(v):
@@ -93,6 +96,10 @@ def build_overrides(config):
         "exact_cut_dual": bool(config["exact_cut_dual"]),
         "use_rc_fixing": bool(config["use_rc_fixing"]),
         "frac_source": str(config["frac_source"]),
+        # REVISION: exact plain dual and the cut-phase length
+        "exact_plain_dual": bool(config.get("exact_plain_dual", False)),
+        "exact_plain_max_msts": int(config.get("exact_plain_max_msts", 60)),
+        "cut_phase_frac": float(config.get("cut_phase_frac", 3.0)),
     }
     if config.get("root_max_iter") is not None:
         ov["root_max_iter"] = int(config["root_max_iter"])
@@ -140,6 +147,7 @@ def run_lrbnb(instance, config, time_limit, instance_seed, cutoff=None):
     root_time = time.time() - start_total
     root_lb = float(getattr(root, "local_lower_bound", float("nan")))
     root_lr_iterations = int(LagrangianMST.lr_iterations)
+    root_plain_msts = int(LagrangianMST.plain_dual_msts)
 
     solver = root.lagrangian_solver
     effective = {k: _json_num(getattr(solver, k, d)) for k, d in _SOLVER_KEYS}
@@ -199,6 +207,13 @@ def run_lrbnb(instance, config, time_limit, instance_seed, cutoff=None):
         "nodes": int(bnb.total_nodes_solved),
         "lr_iterations": int(LagrangianMST.lr_iterations),
         "root_lr_iterations": root_lr_iterations,
+        # REVISION: exact plain dual.  mst_evaluations = all MSTs of the dual
+        # (cut-phase iterations + breakpoint steps), probes included.
+        "plain_dual_calls": int(LagrangianMST.plain_dual_calls),
+        "plain_dual_msts": int(LagrangianMST.plain_dual_msts),
+        "plain_dual_capped": int(LagrangianMST.plain_dual_capped),
+        "root_plain_dual_msts": root_plain_msts,
+        "mst_evaluations": int(LagrangianMST.lr_iterations) + int(LagrangianMST.plain_dual_msts),
         "probes": int(MSTNode.probe_calls),
         "probe_time": float(MSTNode.probe_time),
         "forced_decisions": int(MSTNode.forced_decisions),

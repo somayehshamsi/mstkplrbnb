@@ -56,6 +56,9 @@ CODE_DIR = os.path.dirname(os.path.abspath(__file__))
 if CODE_DIR not in sys.path:
     sys.path.insert(0, CODE_DIR)
 
+# Do NOT change: it is part of every instance seed (instance_seed below), so
+# the revised study reuses exactly the first study's instances.  The revised
+# study is told apart by its own --root and by the solver code hash.
 DESIGN_VERSION = "mstkp-final-v1"
 SOLVER_FILES = ("lagrangianrelaxation.py", "mstkpbranchandbound.py",
                 "branchandbound.py", "mstkpinstance.py", "benchmark_mstkp_.py",
@@ -302,6 +305,15 @@ VARIANTS = {
     # max_iter = 20 runs 20 + 3 * 20 = 80 iterations per node (cut phase),
     # so it80 is the equal-effort no-cut control for R2/R5-it20.
     "it40": {"max_iter": 40}, "it80": {"max_iter": 80},
+    # REVISION.  Every configuration now solves the cut-free node dual
+    # exactly (exact_plain_dual = True in make_config), so max_iter only sets
+    # the length of the cut phase: cut_phase_frac * max_iter iterations at a
+    # node (5 -> 15) and cut_phase_frac * 2 * max_iter at the root (30).
+    #   subgr  the first study's subgradient dual, kept as a reference row
+    #   cp1    cut phase of 1 x max_iter (5 at a node, 10 at the root)
+    #   cp2    cut phase of 2 x max_iter (10 / 20)
+    "subgr": {"exact_plain_dual": False},
+    "cp1": {"cut_phase_frac": 1.0}, "cp2": {"cut_phase_frac": 2.0},
 }
 GRB_FORMS = ("SCF", "DMCF", "DCUT", "CUTSETLAZY")
 
@@ -329,7 +341,10 @@ def make_config(cid):
            "max_iter": 5, "inherit_lambda": True, "inherit_step_size": False,
            "duality_gap_threshold": 0.0, "objective_granularity": 1.0,
            "exact_cut_dual": True, "use_rc_fixing": True, "cutoff": False,
-           "root_max_iter": None, "variant": variant}
+           "root_max_iter": None, "variant": variant,
+           # REVISION: exact plain dual everywhere; cut phase 3 x max_iter
+           "exact_plain_dual": True, "exact_plain_max_msts": 60,
+           "cut_phase_frac": 3.0}
     cfg.update(RUNGS[rung])
     cfg.update(VARIANTS[variant])
     assert lr_config_id(rung, rule, src, variant) == cid, cid
@@ -341,6 +356,13 @@ LADDER5 = ["R0", "R2", "R3", "R4", "R5"]
 BRANCH14 = ([lr_config_id("R5", "rmst"), lr_config_id("R5", "sbmst")]
             + [lr_config_id("R5", t, s) for s in ("dw", "avg")
                for t in ("rfrac", "mf", "pc", "sbf", "rel", "hyb")])
+# REVISION: the branching study runs on the cut-free rung AND on R5, with the
+# DW indicator only.  The averaged indicator is weighted by subgradient step
+# sizes, which the exact plain dual no longer produces.
+BRANCH_RUNGS = ("R0", "R5")
+BRANCH_DW = [c for r in BRANCH_RUNGS for c in
+             ([lr_config_id(r, "rmst"), lr_config_id(r, "sbmst")]
+              + [lr_config_id(r, t, "dw") for t in ("rfrac", "mf", "pc", "sbf", "rel", "hyb")])]
 GRB3 = ["GRB-SCF", "GRB-DMCF", "GRB-DCUT"]
 KNOBS_D = {+0.5: 0.366, 0.0: 0.0, -0.5: -0.366, -0.9: -0.674}   # rho -> knob
 CAL_CANDIDATES = {"F1": {"knob": 0.0, "betas": [0.08, 0.10, 0.12]},
@@ -349,7 +371,7 @@ CAL_RULE = {"reference_config": lr_config_id("R5", "rmst"),
             "min_median_nodes": 1000, "min_solved_share": 0.80}
 
 FAMILY_INFO = {
-    "A": ("core", "Headline ladder R0-R5 + iteration-matched R0 controls, reliability (DW)."),
+    "A": ("core", "Headline ladder R0-R5 (exact plain dual) + R0/R5 with the first study's subgradient dual."),
     "G": ("core", "Ladder under most-fractional (no probes): removes the probe channel."),
     "E": ("core", "Exact cut dual off on R2/R5; reduced-cost fixing off on R0/R5."),
     "ACUT": ("core", "Ladder with UB = z* from the start: removes the primal channel. Needs A."),
@@ -357,17 +379,17 @@ FAMILY_INFO = {
     "B": ("core", "Density x beta grid, ladder R0,R2-R5."),
     "D": ("core", "Correlation sweep rho in {+0.5,0,-0.5,-0.9}, ladder + Gurobi."),
     "CAL": ("core", "Calibration for F (5 calibration seeds, Random(MST)); then select-beta."),
-    "F": ("core", "Branching: 14 rule x source configs on F0/F1/F2. Needs select-beta."),
+    "F": ("core", "Branching: 8 rules (DW) on R0 and on R5, on F0/F1/F2. Needs select-beta."),
     "C": ("core", "Scaling at constant average degree 14.95, R0/R2/R5 + Gurobi."),
     "H": ("core", "Dense end: complete graphs n = 200-500, beta 0.5 / 0.15."),
     "L": ("core", "Large sparse end: n = 1000-8000 at average degree 14.95."),
     "W": ("core", "Size x density x budget grid: n 500/1000/2000, degree 15/50/150, beta .15/.30/.50."),
     "BL": ("core", "Loose budgets beta 0.50 / 0.70 on B's graphs (n = 300, d .05/.10/.20)."),
-    "O1": ("optional", "R0 with 10 / 20 dual iterations (it20 is also in A; adds it10)."),
+    "O1": ("optional", "(first study only; empty: R0 runs no subgradient iterations now)"),
     "O2": ("optional", "Strengthening levels with root-only separation (ladder-order check)."),
     "GLAZY": ("optional", "Lazy undirected cut-set (continuity with the previous version)."),
-    "X": ("confirm", "Confirmation on fresh instances: dual budget 20/40/80 per node, cuts on top."),
-    "XB": ("confirm", "Budget curve on X's fresh instances: R0 with 5 and 10 iterations per node."),
+    "X": ("confirm", "Confirmation on NEW fresh instances: R0, R2, R5, R5 with shorter cut phases, Gurobi DCUT."),
+    "XB": ("confirm", "(first study only; empty in the revised design)"),
 }
 CORE_FAMILIES = [f for f, (kind, _) in FAMILY_INFO.items() if kind == "core"]
 
@@ -414,12 +436,17 @@ def build_families(profile, root):
     core = lambda beta, knob=0.0, group="core": make_cell(profile, 300, 0.05, beta, knob, group)
     rel = lambda rungs: [lr_config_id(r, "rel") for r in rungs]
     fam = {}
-    R0M = [lr_config_id("R0", "rel", variant="rit40"), lr_config_id("R0", "rel", variant="it20")]
-    R0M20 = [lr_config_id("R0", "rel", variant="it20")]
-    fam["A"] = [(core(0.15), list(range(_count(profile, 100))), rel(LADDER6) + R0M)]
+    # REVISION: with the plain dual solved exactly, extra iterations on the
+    # budget multiplier cannot raise a bound, so the iteration-matched
+    # controls (rit40, it20, it80) are gone.  R0M / R0M20 are kept as names,
+    # empty, so the family definitions below read as before.
+    R0M = []
+    R0M20 = []
+    SUBGR = [lr_config_id("R0", "rel", variant="subgr"),
+             lr_config_id("R5", "rel", variant="subgr")]
+    fam["A"] = [(core(0.15), list(range(_count(profile, 100))), rel(LADDER6) + SUBGR)]
     fam["G"] = [(core(0.15), list(range(_count(profile, 100))),
-                 [lr_config_id(r, "mf") for r in LADDER6]
-                 + [lr_config_id("R0", "mf", variant="it20")])]
+                 [lr_config_id(r, "mf") for r in LADDER6])]
     fam["E"] = [(core(0.15), list(range(_count(profile, 100))),
                  [lr_config_id("R2", "rel", variant="noexact"),
                   lr_config_id("R5", "rel", variant="noexact"),
@@ -440,12 +467,12 @@ def build_families(profile, root):
         for beta in spec["betas"]:
             fam["CAL"].append((core(beta, spec["knob"], "calib"),
                                list(range(_count(profile, 5))), [CAL_RULE["reference_config"]]))
-    fam["F"] = [(core(0.15), list(range(_count(profile, 50))), BRANCH14)]
+    fam["F"] = [(core(0.15), list(range(_count(profile, 50))), BRANCH_DW)]
     fb = load_f_beta(root)
     if fb is not None:
-        fam["F"].append((core(fb["F1"]["beta"], 0.0), list(range(_count(profile, 40))), BRANCH14))
+        fam["F"].append((core(fb["F1"]["beta"], 0.0), list(range(_count(profile, 40))), BRANCH_DW))
         fam["F"].append((core(fb["F2"]["beta"], CAL_CANDIDATES["F2"]["knob"]),
-                         list(range(_count(profile, 40))), BRANCH14))
+                         list(range(_count(profile, 40))), BRANCH_DW))
     fam["C"] = [(make_cell(profile, n, scale_density(n), 0.15, 0.0,
                            "core" if n == 300 else f"scale_n{n}", keep_degree=False)
                  if profile == "final" else
@@ -484,31 +511,34 @@ def build_families(profile, root):
     # Confirmation on FRESH instances (seed groups never used above), decided
     # after the core results: does the larger per-node dual budget carry over,
     # and do the cuts add value on top of it?
-    XCFG = [lr_config_id("R5", "rel"),                        # as designed
-            lr_config_id("R0", "rel", variant="it20"),        # budget that worked
-            lr_config_id("R0", "rel", variant="it40"),
-            lr_config_id("R0", "rel", variant="it80"),        # equal effort to R2/R5-it20
-            lr_config_id("R2", "rel", variant="it20"),        # literature cuts + budget
-            lr_config_id("R5", "rel", variant="it20")]        # your cuts + budget
+    # REVISION: a NEW fresh set (seed groups "confirm2_*", used nowhere else
+    # and never by the first study), same cells and counts as before.  It
+    # confirms the comparison with Gurobi on unseen instances (DCUT) and
+    # measures the cut-phase length (cp1 / cp2 / the default 3 x max_iter).
+    XCFG = [lr_config_id("R0", "rel"),                        # no cuts
+            lr_config_id("R2", "rel"),                        # literature cuts
+            lr_config_id("R5", "rel"),                        # your cuts, cut phase 3 x
+            lr_config_id("R5", "rel", variant="cp2"),         # ... 2 x
+            lr_config_id("R5", "rel", variant="cp1"),         # ... 1 x
+            "GRB-DCUT"]
     xcells = (
-        [(make_cell(profile, 300, 0.05, 0.15, 0.0, "confirm_core"),
+        [(make_cell(profile, 300, 0.05, 0.15, 0.0, "confirm2_core"),
           list(range(_count(profile, 25))))]
-        + [(make_cell(profile, 300, d, 0.70, 0.0, f"confirm_grid_d{d:.2f}"),
+        + [(make_cell(profile, 300, d, 0.70, 0.0, f"confirm2_grid_d{d:.2f}"),
             list(range(_count(profile, 20)))) for d in (0.10, 0.20)]
-        + [(make_cell(profile, n, 1.0, 0.50, 0.0, f"confirm_complete_n{n}", complete=True),
+        + [(make_cell(profile, n, 1.0, 0.50, 0.0, f"confirm2_complete_n{n}", complete=True),
             list(range(_count(profile, 10)))) for n in (200, 300)]
-        + [(make_cell(profile, n, round(150 / (n - 1), 6), 0.50, 0.0, f"confirm_wide_n{n}_deg150"),
+        + [(make_cell(profile, n, round(150 / (n - 1), 6), 0.50, 0.0, f"confirm2_wide_n{n}_deg150"),
             list(range(_count(profile, 10)))) for n in (500, 1000)]
-        + [(make_cell(profile, 2000, round(DEG / 1999, 6), 0.15, 0.0, "confirm_large_n2000"),
+        + [(make_cell(profile, 2000, round(DEG / 1999, 6), 0.15, 0.0, "confirm2_large_n2000"),
             list(range(_count(profile, 10))))])
     fam["X"] = [(c, i, XCFG) for c, i in xcells]
-    # Budget curve completed on the SAME fresh instances: 5 (default) and 10
-    # dual iterations per node, next to X's 20 / 40 / 80.
-    fam["XB"] = [(c, i, [lr_config_id("R0", "rel"), lr_config_id("R0", "rel", variant="it10")])
-                 for c, i in xcells]
-    fam["O1"] = [(core(0.15), list(range(_count(profile, 50))),
-                  [lr_config_id("R0", "rel", variant="it10"),
-                   lr_config_id("R0", "rel", variant="it20")])]
+    # The first study's budget curve is not repeated: with the exact plain
+    # dual there is no per-node budget on lambda left to vary.
+    fam["XB"] = []
+    # REVISION: with the exact plain dual R0 runs no subgradient iterations,
+    # so R0-it10 / R0-it20 would be identical to R0.  O1 is empty.
+    fam["O1"] = []
     fam["O2"] = [(core(0.15), list(range(_count(profile, 50))),
                   rel(["R3root", "R4root", "R5root"]))]
     fam["GLAZY"] = [(core(0.15), list(range(_count(profile, 50))), ["GRB-CUTSETLAZY"])]
@@ -1696,13 +1726,16 @@ PAPER_METRICS = [
     "rc_edges_excluded", "rc_edges_fixed", "indicator_calls", "indicator_none",
     "indicator_time", "pool_median", "pool_singleton_share", "pool_empty_share",
     "cutoff", "cutoff_violated",
+    # REVISION: exact plain dual
+    "plain_dual_calls", "plain_dual_msts", "plain_dual_capped", "root_plain_dual_msts",
+    "mst_evaluations",
     # gurobi
     "build_time", "grb_runtime", "user_cuts", "lazy_cuts",
 ]
 CFG_COLS = ["solver", "rung", "rule_tag", "branching_rule", "frac_source", "variant",
             "cover_cuts", "cut_strengthening", "cut_root_only", "max_active_cuts",
             "rank_lift", "exact_cut_dual", "use_rc_fixing", "cutoff", "max_iter",
-            "root_max_iter", "formulation"]
+            "root_max_iter", "formulation", "exact_plain_dual", "cut_phase_frac"]
 META_COLS = ["m", "avg_degree", "rho_realized", "plain_lr_bound", "plain_lr_lambda",
              "min_length_tree_weight", "len_Tw", "len_Tl"]
 
@@ -1879,8 +1912,9 @@ def cmd_select_beta(a):
 # try: ad-hoc runs outside the frozen design (the old benchmark_mstkp.py use)
 # =============================================================================
 TRY_SETS = {
-    "ladder": LADDER6, "branching": BRANCH14, "gurobi": GRB3,
-    "controls": ["R0-rel-dw-rit40", "R0-rel-dw-it20"],
+    "ladder": LADDER6, "branching": BRANCH_DW, "gurobi": GRB3,
+    # REVISION: the first study's subgradient dual next to the exact one
+    "controls": ["R0-rel-dw-subgr", "R5-rel-dw-subgr"],
 }
 
 
@@ -1927,7 +1961,7 @@ def cmd_try(a):
           f"budget={inst.budget}\n          plain Lagrangian bound L*={Ls:.1f}  "
           f"min-length-tree weight={mlw:.0f}  time limit={a.time_limit:.0f}s\n")
     head = (f"{'config':22s} {'status':9s} {'obj':>10s} {'root_lb':>11s} {'final_lb':>11s} "
-            f"{'nodes':>8s} {'LR iters':>9s} {'probes':>7s} {'cuts':>6s} {'time s':>8s} {'ok':>3s}")
+            f"{'nodes':>8s} {'MSTs':>9s} {'probes':>7s} {'cuts':>6s} {'time s':>8s} {'ok':>3s}")
     print(head)
     print("-" * len(head))
     rows, zstar = [], None
@@ -1971,7 +2005,7 @@ def cmd_try(a):
         f = lambda v, w, d=1: (f"{v:{w}.{d}f}" if isinstance(v, (int, float)) and v is not None
                                else f"{'-':>{w}s}")
         print(f"{cid:22s} {m.get('status', '?'):9s} {f(m.get('obj'), 10, 0)} {f(m.get('root_lb'), 11)} "
-              f"{f(m.get('final_lb'), 11)} {f(m.get('nodes'), 8, 0)} {f(m.get('lr_iterations'), 9, 0)} "
+              f"{f(m.get('final_lb'), 11)} {f(m.get('nodes'), 8, 0)} {f(m.get('mst_evaluations', m.get('lr_iterations')), 9, 0)} "
               f"{f(m.get('probes'), 7, 0)} {f(m.get('cuts_separated', m.get('user_cuts')), 6, 0)} "
               f"{f(m.get('wall_time', time.time() - t0), 8)} "
               f"{'yes' if ok else ('-' if ok is None else 'NO'):>3s}", flush=True)

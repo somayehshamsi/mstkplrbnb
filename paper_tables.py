@@ -51,7 +51,9 @@ def fmt_num(v, digits=3):
         return f"{v:.0f}"
     if a >= 10:
         return f"{v:.1f}"
-    return f"{v:.{digits}g}"
+    # REVISION: keep trailing zeros (1.00, 0.950, 3.60) so every ratio and
+    # p-value shows three significant figures.
+    return f"{v:#.{digits}g}".rstrip(".")
 
 
 def ratio_ci(r, lo, hi):
@@ -180,14 +182,16 @@ def pooled(df, a, b, cells, B, rng):
 # ----------------------------------------------------------------- figures
 def make_figures(df, fams, cellinfo, present, out, TL, plt):
     made = []
-    style = {C("R0"): ("R0 (5 it.)", "tab:gray", "-"), C("R2"): ("R2 literature cuts", "tab:blue", "-"),
+    # REVISION: exact plain dual; no titles inside the figures (the captions
+    # carry them); legend placed clear of the curves.
+    style = {C("R0"): ("R0 no cuts", "tab:green", "-"), C("R2"): ("R2 literature cuts", "tab:blue", "-"),
              C("R5"): ("R5 strengthened cuts", "tab:red", "-"),
-             C("R0", variant="it20"): ("R0, 20 it./node", "tab:green", "-"),
+             C("R0", variant="subgr"): ("R0, subgradient dual", "tab:gray", "-"),
              "GRB-SCF": ("Gurobi SCF", "tab:purple", "--"), "GRB-DMCF": ("Gurobi DMCF", "tab:brown", "--"),
              "GRB-DCUT": ("Gurobi DCUT", "black", "--")}
 
     # F1: performance profile over all cells with a Gurobi comparison
-    cfgs = [C("R0"), C("R2"), C("R5"), C("R0", variant="it20"), "GRB-SCF", "GRB-DCUT"]
+    cfgs = [C("R0"), C("R2"), C("R5"), "GRB-SCF", "GRB-DCUT"]
     cells = [cid for cid in cellinfo if all(present(cid, c) for c in cfgs)]
     if cells:
         sub = df[df.cell_id.isin(cells) & df.config_id.isin(cfgs)]
@@ -205,8 +209,9 @@ def make_figures(df, fams, cellinfo, present, out, TL, plt):
             ax.step(taus, [(r <= t).mean() for t in taus], where="post", label=lab, color=col, ls=ls)
         ax.set_xscale("log"); ax.set_xlabel("time ratio to the best configuration (τ)")
         ax.set_ylabel("share of instances"); ax.set_ylim(0, 1.02)
-        ax.set_title(f"Performance profile ({len(T)} instances, {len(cells)} cells)")
-        ax.legend(fontsize=8, loc="lower right"); ax.grid(alpha=.3)
+        print(f"F1 performance profile: {len(T)} instances, {len(cells)} cells; solved: "
+              + ", ".join(f"{c} {int(np.isfinite(T[c]).sum())}" for c in cfgs))
+        ax.legend(fontsize=8, loc="center right"); ax.grid(alpha=.3)
         for ext in ("pdf", "png"):
             fig.savefig(os.path.join(out, f"F1_performance_profile.{ext}"), bbox_inches="tight", dpi=200)
         plt.close(fig)
@@ -221,7 +226,7 @@ def make_figures(df, fams, cellinfo, present, out, TL, plt):
     if pts:
         pts = sorted({c["n"]: (c, i) for c, i in pts}.values(), key=lambda ci: ci[0]["n"])
         fig, ax = plt.subplots(figsize=(6, 4))
-        plotted = [C("R0"), C("R2"), C("R5"), C("R0", variant="it20"), "GRB-SCF", "GRB-DCUT"]
+        plotted = [C("R0"), C("R2"), C("R5"), "GRB-SCF", "GRB-DCUT"]
         # each point: the family's own instances that every plotted configuration has
         subs = {c["id"]: common_rows(df, c["id"], [x for x in plotted if present(c["id"], x)], i)
                 for c, i in pts}
@@ -237,38 +242,19 @@ def make_figures(df, fams, cellinfo, present, out, TL, plt):
                 ax.plot(xs, ys, marker="o", label=lab, color=col, ls=ls)
         ax.axhline(TL, color="k", lw=.6, ls=":"); ax.set_xscale("log"); ax.set_yscale("log")
         ax.set_xlabel("number of vertices n (average degree ≈ 15)"); ax.set_ylabel("SGM time (s)")
-        ax.set_title("Scaling"); ax.legend(fontsize=8); ax.grid(alpha=.3, which="both")
+        from matplotlib.ticker import FixedLocator, NullFormatter
+        ns = [c["n"] for c in pts]
+        ax.xaxis.set_major_locator(FixedLocator(ns))
+        ax.set_xticklabels([str(v) for v in ns])
+        ax.xaxis.set_minor_formatter(NullFormatter())
+        ax.legend(fontsize=8); ax.grid(alpha=.3, which="both")
         for ext in ("pdf", "png"):
             fig.savefig(os.path.join(out, f"F2_scaling.{ext}"), bbox_inches="tight", dpi=200)
         plt.close(fig)
         made.append("F2_scaling.pdf/png")
 
-    # F3: budget curve on the fresh instances
-    xcells = [c["id"] for c, _, _ in fams.get("X", []) if (df.cell_id == c["id"]).any()]
-    curve = [(5, C("R0")), (10, C("R0", variant="it10")), (20, C("R0", variant="it20")),
-             (40, C("R0", variant="it40")), (80, C("R0", variant="it80"))]
-    curve = [(k, c) for k, c in curve if (df[df.cell_id.isin(xcells)].config_id == c).any()]
-    if len(curve) >= 2:
-        regimes = {"sparse / loose": [c for c in xcells if cellinfo[c]["density"] < 1.0],
-                   "complete graphs": [c for c in xcells if cellinfo[c]["density"] >= 1.0]}
-        fig, axes = plt.subplots(1, 2, figsize=(9, 3.6))
-        for reg, cells in regimes.items():
-            if not cells:
-                continue
-            sub = df[df.cell_id.isin(cells)]
-            ks = [k for k, _ in curve]
-            t = [AF.sgm(sub[sub.config_id == c].capped_time, AF.SHIFT_T) for _, c in curve]
-            sv = [sub[sub.config_id == c].solved.mean() for _, c in curve]
-            axes[0].plot(ks, t, marker="o", label=reg); axes[1].plot(ks, sv, marker="o", label=reg)
-        for ax, yl in zip(axes, ("SGM time (s)", "share solved")):
-            ax.set_xscale("log"); ax.set_xticks([k for k, _ in curve]); ax.set_xticklabels([k for k, _ in curve])
-            ax.set_xlabel("dual iterations per node (R0, no cuts)"); ax.set_ylabel(yl); ax.grid(alpha=.3)
-        axes[0].set_yscale("log"); axes[1].set_ylim(0, 1.05); axes[1].legend(fontsize=8)
-        fig.suptitle("Dual budget per node (fresh instances)")
-        for ext in ("pdf", "png"):
-            fig.savefig(os.path.join(out, f"F3_budget_curve.{ext}"), bbox_inches="tight", dpi=200)
-        plt.close(fig)
-        made.append("F3_budget_curve.pdf/png")
+    # REVISION: F3 (dual budget curve, R0 with 5-80 iterations) is gone --
+    # with the exact plain dual R0 has no iteration budget left to vary.
     return made
 
 
@@ -314,8 +300,8 @@ def main_text_tables(df, fams, cellinfo, present, out, a, rng):
              ("dense: $n=2000$, deg 150, β=0.3", "wide_n2000_deg150", 0.30, 0.0),
              ("complete: $n=500$, β=0.15", "complete_n500", 0.15, 0.0),
              ("complete: $n=500$, β=0.5", "complete_n500", 0.50, 0.0)]
-    cfgs = [C("R5"), C("R0", variant="it20"), "GRB-SCF", "GRB-DMCF", "GRB-DCUT"]
-    names = {C("R5"): "LR-BnB R5 (5 it.)", C("R0", variant="it20"): "LR-BnB R0 (20 it.)",
+    cfgs = [C("R0"), C("R5"), "GRB-SCF", "GRB-DMCF", "GRB-DCUT"]
+    names = {C("R0"): "LR-BnB R0 (no cuts)", C("R5"): "LR-BnB R5 (cuts)",
              "GRB-SCF": "Gurobi SCF", "GRB-DMCF": "Gurobi DMCF", "GRB-DCUT": "Gurobi DCUT"}
     rows = []
     for label, grp, beta, knob in specs:
@@ -334,36 +320,43 @@ def main_text_tables(df, fams, cellinfo, present, out, a, rng):
                                "instances.  Time limit 1800 s; 'mem' = runs stopped at the memory limit; DMCF was "
                                "not run where its model would exceed $10^7$ variables.  All cells: appendix."))
 
-    # M2a: matched controls on the headline cell
+    # M2a: the dual and the cuts on the headline cell.  REVISION: the
+    # iteration-matched controls are gone; the first study's subgradient dual
+    # (variant subgr) is shown next to the exact one on the same instances.
     head = find_cell(cellinfo, "core", 0.15, 0.0)
     if present_any(head):
-        order = [(C("R0"), "R0: no cuts, 5 it./node"), (C("R0", variant="rit40"), "R0-rit40: R1's root budget"),
-                 (C("R1"), "R1: literature cuts, root only"), (C("R0", variant="it20"), "R0-it20: 20 it./node"),
-                 (C("R2"), "R2: literature cuts, node-local"), (C("R5"), "R5: strengthened cuts")]
+        order = [(C("R0", variant="subgr"), "R0, subgradient dual (first study)"),
+                 (C("R0"), "R0: exact dual, no cuts"),
+                 (C("R1"), "R1: literature cuts, root only"),
+                 (C("R2"), "R2: literature cuts, node-local"),
+                 (C("R5"), "R5: strengthened cuts"),
+                 (C("R5", variant="subgr"), "R5, subgradient dual (first study)")]
         order = [(c, l) for c, l in order if present(head["id"], c)]
         H = common_rows(df, head["id"], [c for c, _ in order])
         S = AF.summary(H, [c for c, _ in order]).set_index("config")
         rows = []
         for c, l in order:
             g = H[H.config_id == c]
-            ipn = float((g.lr_iterations.astype(float) / g.nodes.clip(lower=1).astype(float)).median())
-            rows.append({"configuration": l, "dual it. / node": fmt_num(ipn),
-                         "root it.": fmt_num(S.loc[c, "median_root_iters"]),
+            work = g["mst_evaluations"] if "mst_evaluations" in g and g["mst_evaluations"].notna().any() \
+                else g["lr_iterations"]
+            ipn = float((work.astype(float) / g.nodes.clip(lower=1).astype(float)).median())
+            rows.append({"configuration": l, "MSTs / node": fmt_num(ipn),
                          "root gap (%)": fmt_num(S.loc[c, "median_root_gap_pct"]),
                          "SGM nodes": fmt_num(S.loc[c, "sgm_nodes_common"]),
                          "SGM time (s)": fmt_num(S.loc[c, "sgm_time"])})
-        sec.append(write_table(out, "M2a_controls", "Headline cell: cuts and dual effort", pd.DataFrame(rows),
-                               f"All {len(H) // max(1, len(order))} instances solved by every configuration; dual "
-                               "iterations per node include strong-branching probes; root gap relative to the optimum."))
+        sec.append(write_table(out, "M2a_dual", "Headline cell: node dual and cuts", pd.DataFrame(rows),
+                               f"{len(H) // max(1, len(order))} instances per configuration; MSTs per node "
+                               "include breakpoint steps, cut-phase iterations and strong-branching probes; "
+                               "root gap relative to the optimum."))
 
-    # M2b: regimes where five dual iterations per node fail
+    # M2b: the cells where the first study's five-iteration dual failed.
     specs = [("complete, $n=300$, β=0.5", "complete_n300", 0.50, 0.0),
              ("complete, $n=500$, β=0.5", "complete_n500", 0.50, 0.0),
              ("deg 150, $n=1000$, β=0.5", "wide_n1000_deg150", 0.50, 0.0),
              ("deg 150, $n=2000$, β=0.3", "wide_n2000_deg150", 0.30, 0.0),
              ("deg 60, $n=300$, β=0.7", "grid_d0.20", 0.70, 0.0),
              ("deg 15, $n=300$, ρ=-0.5", "core", 0.15, -0.366)]
-    cfg8 = [C("R0"), C("R2"), C("R5"), C("R0", variant="it20")]
+    cfg8 = [C("R0"), C("R2"), C("R5")]
     rows = []
     for label, grp, beta, knob in specs:
         c = find_cell(cellinfo, grp, beta, knob)
@@ -372,32 +365,33 @@ def main_text_tables(df, fams, cellinfo, present, out, a, rng):
         sub = common_rows(df, c["id"], cfg8)
         rows.append({"instances": label, **{x: solved_sgm(sub[sub.config_id == x]) for x in cfg8}})
     if rows:
-        sec.append(write_table(out, "M2b_regimes", "Where five dual iterations per node fail: solved / instances "
-                               "(SGM time)", pd.DataFrame(rows), "R0, R2, R5: 5 dual iterations per node (cut rungs "
-                               "add a cut phase when covers are found); R0-rel-dw-it20: 20 and no cuts.  All cells: "
-                               "appendix."))
+        sec.append(write_table(out, "M2b_regimes", "The hardest cells of the first study: solved / instances "
+                               "(SGM time)", pd.DataFrame(rows), "Exact node dual; cut rungs add a cut phase when "
+                               "covers are found.  All cells: appendix."))
 
     # M3: strengthened cuts -- headline steps and fresh pooled comparisons
     rows = []
     if present_any(head):
         Hd = df[df.cell_id == head["id"]]
-        for label, x, y in [("Lemma 1 (R2 → R3)", C("R2"), C("R3")), ("full strengthening (R3 → R4)", C("R3"), C("R4")),
+        for label, x, y in [("unit lifting (R2 → R3)", C("R2"), C("R3")),
+                            ("tree-completion lifting (R3 → R4)", C("R3"), C("R4")),
                             ("rank lifting (R4 → R5)", C("R4"), C("R5")),
                             ("all strengthening (R2 → R5)", C("R2"), C("R5")),
-                            ("R5 vs budget-matched cut-free (R0-it20 → R5)", C("R0", variant="it20"), C("R5"))]:
+                            ("cuts vs none (R0 → R5)", C("R0"), C("R5"))]:
             if present(head["id"], x) and present(head["id"], y):
                 r = AF.paired(Hd, x, y, a.boot, rng)
-                rows.append({"setting": "headline, 5 it./node", "comparison": label, "n": r["n"],
+                rows.append({"setting": "headline", "comparison": label, "n": r["n"],
                              "nr": r["node_ratio"], "nlo": r["node_ci_lo"], "nhi": r["node_ci_hi"], "np": r["node_p"],
                              "tr": r["time_ratio"], "tlo": r["time_ci_lo"], "thi": r["time_ci_hi"], "tp": r["time_p"]})
     xcells = [c["id"] for c, _, _ in fams.get("X", []) if (df.cell_id == c["id"]).any()]
     if xcells:
-        for label, x, y in [("strengthened vs literature (R2 → R5)", C("R2", variant="it20"), C("R5", variant="it20")),
-                            ("cuts vs equal dual effort (R0-it80 → R5)", C("R0", variant="it80"), C("R5", variant="it20")),
-                            ("cuts on top of R0-it20 (R0-it20 → R5)", C("R0", variant="it20"), C("R5", variant="it20"))]:
+        for label, x, y in [("strengthened vs literature (R2 → R5)", C("R2"), C("R5")),
+                            ("cuts vs none (R0 → R5)", C("R0"), C("R5")),
+                            ("cut phase 2× instead of 3× (R5 → R5-cp2)", C("R5"), C("R5", variant="cp2")),
+                            ("cut phase 1× instead of 3× (R5 → R5-cp1)", C("R5"), C("R5", variant="cp1"))]:
             r = pooled(df, x, y, xcells, a.boot, rng)
             if r:
-                rows.append({"setting": "fresh, 20 it./node", "comparison": label, "n": r["n"],
+                rows.append({"setting": "fresh", "comparison": label, "n": r["n"],
                              "nr": r["node_ratio"], "nlo": r["node_lo"], "nhi": r["node_hi"], "np": r["node_p"],
                              "tr": r["time_ratio"], "tlo": r["time_lo"], "thi": r["time_hi"], "tp": r["time_p"]})
     if rows:
@@ -410,38 +404,48 @@ def main_text_tables(df, fams, cellinfo, present, out, a, rng):
                           "p ": [fmt_num(v) for v in R.tp_h]})
         sec.append(write_table(out, "M3_cuts", "Strengthened cover cuts: node and time ratios", T,
                                "Ratio b/a of geometric means over paired instances (< 1: b better); fresh rows pooled "
-                               "over the 115 confirmation instances (bootstrap stratified by cell); Wilcoxon p, Holm "
-                               "across the rows."))
+                               "over the confirmation instances (bootstrap stratified by cell); Wilcoxon p, Holm "
+                               "across the rows of this table."))
 
-    # M4: branching, pooled over the three cells of family F
+    # M4: branching, pooled over the three cells of family F, on each rung.
+    # REVISION: rungs R0 and R5, DW indicator only.
     fcells = [c["id"] for c, _, _ in fams.get("F", []) if (df.cell_id == c["id"]).any()]
-    ref = FS.lr_config_id("R5", "rmst")
-    if fcells and any(present(c, ref) for c in fcells):
-        rules = [("Random (MST)", "rmst"), ("Strong branching (MST)", "sbmst"), ("Random (frac.)", "rfrac"),
-                 ("Most fractional", "mf"), ("Pseudo-cost", "pc"), ("Strong branching (frac.)", "sbf"),
-                 ("Reliability", "rel"), ("Hybrid", "hyb")]
+    rules = [("Random (MST)", "rmst"), ("Strong branching (MST)", "sbmst"), ("Random (frac.)", "rfrac"),
+             ("Most fractional", "mf"), ("Pseudo-cost", "pc"), ("Strong branching (frac.)", "sbf"),
+             ("Reliability", "rel"), ("Hybrid", "hyb")]
+    for rung in FS.BRANCH_RUNGS:
+        ref = FS.lr_config_id(rung, "rmst")
+        if not (fcells and any(present(c, ref) for c in fcells)):
+            continue
         rows = []
         for name, tag in rules:
+            cid_cfg = FS.lr_config_id(rung, tag, "dw") if FS.RULES[tag][1] else FS.lr_config_id(rung, tag)
             row = {"rule": name}
-            for src, col in (("dw", "DW"), ("avg", "averaged")):
-                if not FS.RULES[tag][1] and src == "avg":
-                    row[f"{col}: nodes"] = row[f"{col}: time"] = "–"
-                    continue
-                cid_cfg = FS.lr_config_id("R5", tag, src) if FS.RULES[tag][1] else FS.lr_config_id("R5", tag)
-                if cid_cfg == ref:
-                    row[f"{col}: nodes"] = row[f"{col}: time"] = "1 (reference)"
-                    continue
+            if cid_cfg == ref:
+                row["nodes"] = row["time"] = "1 (reference)"
+            else:
                 r = pooled(df, ref, cid_cfg, fcells, a.boot, rng)
-                row[f"{col}: nodes"] = ratio_ci(r["node_ratio"], r["node_lo"], r["node_hi"]) if r else "–"
-                row[f"{col}: time"] = ratio_ci(r["time_ratio"], r["time_lo"], r["time_hi"]) if r else "–"
-            main_cfg = FS.lr_config_id("R5", tag, "dw") if FS.RULES[tag][1] else FS.lr_config_id("R5", tag)
-            g = df[df.cell_id.isin(fcells) & (df.config_id == main_cfg)]
+                row["nodes"] = ratio_ci(r["node_ratio"], r["node_lo"], r["node_hi"]) if r else "–"
+                row["time"] = ratio_ci(r["time_ratio"], r["time_lo"], r["time_hi"]) if r else "–"
+            g = df[df.cell_id.isin(fcells) & (df.config_id == cid_cfg)]
             row["probes / node"] = fmt_num(float((g.probes.astype(float) / g.nodes.clip(lower=1)).median()))
+            if "pool_empty_share" in g:
+                row["no fractional edge (share of decisions)"] = fmt_num(float(g.pool_empty_share.median()))
             rows.append(row)
-        sec.append(write_table(out, "M4_branching", "Branching rules with R5 cuts: ratios to Random (MST)",
-                               pd.DataFrame(rows), "Pooled over the three branching cells (headline, β=0.08, "
-                               "ρ=-0.9; 130 instances), paired ratios to Random (MST) with bootstrap 95% CI "
-                               "stratified by cell; < 1: fewer nodes / less time.  DW: Dantzig-Wolfe indicator.  "
+        # REVISION: the cells and the instance count are read from the data
+        # (F1 / F2 come from select-beta), not written into the note.
+        _fi = [c for c, _, _ in fams.get("F", []) if c["id"] in fcells]
+        _rho = {round(v, 3): k for k, v in FS.KNOBS_D.items()}
+        _desc = "; ".join("headline" if (abs(c["beta"] - 0.15) < 1e-9 and abs(c["knob"]) < 1e-9)
+                          else (f"β={c['beta']:g}" + (f" with ρ={_rho.get(round(c['knob'], 3), c['knob']):g}"
+                                                      if abs(c["knob"]) > 1e-9 else ""))
+                          for c in _fi)
+        _ninst = int(len(df[df.cell_id.isin(fcells) & (df.config_id == ref)]))
+        sec.append(write_table(out, f"M4_branching_{rung}",
+                               f"Branching rules ({rung}): ratios to Random (MST)",
+                               pd.DataFrame(rows), f"Pooled over the {len(_fi)} branching cells ({_desc}; "
+                               f"{_ninst} instances), paired ratios to Random (MST) with bootstrap 95% CI "
+                               "stratified by cell; < 1: fewer nodes / less time.  Dantzig-Wolfe indicator.  "
                                "Per-cell results: appendix."))
     return sec
 
@@ -479,7 +483,7 @@ def forest_figure(R, out, plt):
     ax.xaxis.set_major_locator(FixedLocator(ticks)); ax.xaxis.set_minor_locator(NullLocator())
     ax.xaxis.set_major_formatter(FormatStrFormatter("%g"))
     ax.set_xlabel("node ratio, strengthened (R5) / literature (R2) cuts")
-    ax.set_title(f"Every cell with a defined ratio: {below} of {len(R)} below 1", fontsize=10)
+    print(f"F4: {below} of {len(R)} cells with a defined ratio below 1")
     ax.legend(fontsize=7, loc="upper left"); ax.grid(alpha=.3, axis="x")
     for ext in ("pdf", "png"):
         fig.savefig(os.path.join(out, f"F4_strengthening_cells.{ext}"), bbox_inches="tight", dpi=200)
@@ -512,12 +516,15 @@ def main():
         regimes = {"all fresh cells": xcells,
                    "sparse / loose": [c for c in xcells if cellinfo[c]["density"] < 1.0],
                    "complete graphs": [c for c in xcells if cellinfo[c]["density"] >= 1.0]}
+        # REVISION: comparisons declared for the new fresh set
         declared = [
-            ("strengthened vs literature cuts, same budget", C("R2", variant="it20"), C("R5", variant="it20")),
-            ("cuts vs same effort spent on the dual (80 it./node)", C("R0", variant="it80"), C("R5", variant="it20")),
-            ("literature cuts vs same effort on the dual", C("R0", variant="it80"), C("R2", variant="it20")),
-            ("cuts on top of the fastest cut-free setting", C("R0", variant="it20"), C("R5", variant="it20")),
-            ("larger budget for R5 as designed", C("R5"), C("R5", variant="it20")),
+            ("strengthened vs literature cuts", C("R2"), C("R5")),
+            ("literature cuts vs none", C("R0"), C("R2")),
+            ("strengthened cuts vs none", C("R0"), C("R5")),
+            ("cut phase 2x instead of 3x", C("R5"), C("R5", variant="cp2")),
+            ("cut phase 1x instead of 3x", C("R5"), C("R5", variant="cp1")),
+            ("LR-BnB R0 vs Gurobi DCUT", "GRB-DCUT", C("R0")),
+            ("LR-BnB R5 vs Gurobi DCUT", "GRB-DCUT", C("R5")),
         ]
         rows = []
         for reg, cells in regimes.items():
@@ -547,9 +554,8 @@ def main():
                 "instances solved by both; 95% CI from a bootstrap stratified by cell; Wilcoxon "
                 "p-values, Holm-adjusted within each regime."))
 
-        # ---- T6: dual budget curve ----------------------------------------
-        curve = [(5, C("R0")), (10, C("R0", variant="it10")), (20, C("R0", variant="it20")),
-                 (40, C("R0", variant="it40")), (80, C("R0", variant="it80"))]
+        # ---- T6: cut-phase length (REVISION: replaces the dual budget curve) --
+        curve = [("1x", C("R5", variant="cp1")), ("2x", C("R5", variant="cp2")), ("3x", C("R5"))]
         curve = [(k, c) for k, c in curve if (df.config_id == c).any()
                  and df[(df.config_id == c) & df.cell_id.isin(xcells)].shape[0]]
         if len(curve) >= 2:
@@ -560,7 +566,7 @@ def main():
                 sub = df[df.cell_id.isin(cells)]
                 for k, c in curve:
                     g = sub[sub.config_id == c]
-                    rows.append({"regime": reg, "iterations / node": k, "config": c,
+                    rows.append({"regime": reg, "cut phase (x max_iter)": k, "config": c,
                                  "solved": f"{int(g.solved.sum())}/{len(g)}",
                                  "memory stops": int(g.status.eq("memory").sum()),
                                  "SGM time (s)": fmt_num(AF.sgm(g.capped_time, AF.SHIFT_T)),
@@ -568,41 +574,44 @@ def main():
                 for (k1, c1), (k2, c2) in zip(curve[:-1], curve[1:]):
                     r = pooled(df, c1, c2, cells, a.boot, rng)
                     if r:
-                        rows.append({"regime": reg, "iterations / node": f"{k1} → {k2}", "config": "",
+                        rows.append({"regime": reg, "cut phase (x max_iter)": f"{k1} → {k2}", "config": "",
                                      "solved": f"{r['solved_a']} → {r['solved_b']}",
                                      "memory stops": "",
                                      "SGM time (s)": "ratio " + ratio_ci(r["time_ratio"], r["time_lo"], r["time_hi"]),
                                      "SGM nodes (solved)": "ratio " + ratio_ci(r["node_ratio"], r["node_lo"], r["node_hi"])})
             sections.append(write_table(
-                out, "T6_budget_curve", "Dual iterations per node (R0, no cuts) on the fresh instances",
-                pd.DataFrame(rows), "Ratios: next budget / previous budget, paired, stratified bootstrap 95% CI."))
+                out, "T6_cut_phase", "Length of the cut phase (R5) on the fresh instances",
+                pd.DataFrame(rows), "Cut phase of 1, 2 or 3 times max_iter (5) iterations per node; ratios: "
+                "next setting / previous setting, paired, stratified bootstrap 95% CI."))
 
     # ---- T1: headline ladder --------------------------------------------
     head = next((c for c, _, _ in fams.get("A", []) if (df.cell_id == c["id"]).any()), None)
     if head is not None:
-        ladder = [C(r) for r in FS.LADDER6] + [C("R0", variant="rit40"), C("R0", variant="it20")]
+        ladder = [C(r) for r in FS.LADDER6] + [C("R0", variant="subgr"), C("R5", variant="subgr")]
         ladder = [c for c in ladder if present(head["id"], c)]
         S = AF.summary(df[df.cell_id == head["id"]], ladder)
         Hc = df[df.cell_id == head["id"]]
-        ipn = {c: float((Hc[Hc.config_id == c].lr_iterations.astype(float)
+        _work = "mst_evaluations" if "mst_evaluations" in Hc else "lr_iterations"
+        ipn = {c: float((Hc[Hc.config_id == c][_work].astype(float)
                          / Hc[Hc.config_id == c].nodes.clip(lower=1).astype(float)).median())
                for c in ladder}
         T = pd.DataFrame({
             "configuration": S.config, "solved": S.solved.astype(str) + "/" + S.N.astype(str),
             "SGM time (s)": [fmt_num(v) for v in S.sgm_time],
             "SGM nodes": [fmt_num(v) for v in S.sgm_nodes_common],
-            "root iterations": [fmt_num(v) for v in S.median_root_iters],
-            "LR iterations / node": [fmt_num(ipn[c]) for c in S.config],
+            "MSTs / node": [fmt_num(ipn[c]) for c in S.config],
             "root gap (%)": [fmt_num(v) for v in S.median_root_gap_pct],
             "cuts (median)": [fmt_num(v) for v in S.median_cuts],
             "separation share": [fmt_num(v) for v in S.median_sep_share]})
         sections.append(write_table(out, "T1_headline", f"Headline cell: {cell_label(head)}", T,
-                                    f"SGM over all instances (time) and commonly solved ones (nodes); LR "
-                                    f"iterations per node: median over runs, strong-branching probes included; "
+                                    f"SGM over all instances (time) and commonly solved ones (nodes); MSTs per "
+                                    f"node: median over runs, breakpoint steps, cut-phase iterations and "
+                                    f"strong-branching probes included; "
                                     f"L* gap {fmt_num(float(S.median_lstar_gap_pct.iloc[0]))}%."))
-        pairs = [(C("R0"), C("R1")), (C("R0", variant="rit40"), C("R1")), (C("R1"), C("R2")),
+        pairs = [(C("R0", variant="subgr"), C("R0")), (C("R5", variant="subgr"), C("R5")),
+                 (C("R0"), C("R1")), (C("R1"), C("R2")),
                  (C("R2"), C("R3")), (C("R3"), C("R4")), (C("R4"), C("R5")), (C("R2"), C("R5")),
-                 (C("R0", variant="it20"), C("R2")), (C("R0", variant="it20"), C("R5"))]
+                 (C("R0"), C("R2")), (C("R0"), C("R5"))]
         rows = []
         for x, y in pairs:
             if present(head["id"], x) and present(head["id"], y):
@@ -626,7 +635,7 @@ def main():
     T2R = None
     rows = []
     for cid, info in cellinfo.items():
-        for lit, own, budget in ((C("R2"), C("R5"), 5), (C("R2", variant="it20"), C("R5", variant="it20"), 20)):
+        for lit, own, budget in ((C("R2"), C("R5"), 5),):
             if present(cid, lit) and present(cid, own):
                 r = AF.paired(df[df.cell_id == cid], lit, own, min(a.boot, 5000), rng)
                 cuts = df[(df.cell_id == cid) & (df.config_id == own)].cuts_separated.median()
@@ -636,17 +645,17 @@ def main():
         R = pd.DataFrame(rows).sort_values(["budget", "cell"])
         R["node_p_holm"] = AF.holm(R.node_p.fillna(1.0))
         T2R = R.copy()
-        T = pd.DataFrame({"cell": R.cell, "λ-iterations / node": R.budget, "instances": R.n,
+        T = pd.DataFrame({"cell": R.cell, "instances": R.n,
                           "cuts (median, R5)": [fmt_num(v) for v in R["cuts (median)"]],
                           "node ratio R5/R2 [95% CI]": [ratio_ci(*v) for v in zip(R.node_ratio, R.node_ci_lo, R.node_ci_hi)],
                           "p (Holm)": [fmt_num(v) for v in R.node_p_holm],
                           "time ratio R5/R2 [95% CI]": [ratio_ci(*v) for v in zip(R.time_ratio, R.time_ci_lo, R.time_ci_hi)]})
         sections.append(write_table(out, "T2_strengthening", "Strengthened cuts (R5) vs literature cuts (R2), every cell", T,
-                                    "Paired, same dual budget; nodes on instances solved by both; cells with 0 cuts "
+                                    "Paired; nodes on instances solved by both; cells with 0 cuts "
                                     "separated show no effect by construction."))
 
     # ---- T3: LR-BnB vs Gurobi -----------------------------------------------
-    cfgs = [C("R5"), C("R0", variant="it20"), "GRB-SCF", "GRB-DMCF", "GRB-DCUT"]
+    cfgs = [C("R0"), C("R5"), "GRB-SCF", "GRB-DMCF", "GRB-DCUT"]
     rows = []
     for cid, info in cellinfo.items():
         if not any(present(cid, g) for g in cfgs[2:]):
@@ -714,7 +723,7 @@ def main():
 
     # ---- T8: dual budget / robustness in every core cell ---------------------
     order = ["A", "B", "BL", "D", "C", "H", "L", "W"]
-    cfg8 = [C("R0"), C("R2"), C("R5"), C("R0", variant="it20")]
+    cfg8 = [C("R0"), C("R2"), C("R5")]
     seen, rows = set(), []
     for f in order:
         for c, _, cf in fams.get(f, []):
@@ -733,8 +742,8 @@ def main():
     if rows:
         sections.append(write_table(
             out, "T8_regimes", "Dual budget and robustness: solved / instances (SGM time) in every cell",
-            pd.DataFrame(rows), "R0/R2/R5 use 5 dual iterations per node (cut rungs add a cut phase); "
-            "R0-rel-dw-it20 uses 20 and no cuts.  'mem' = runs stopped at the memory limit."))
+            pd.DataFrame(rows), "Exact node dual; cut rungs add a cut phase when covers are found.  "
+            "'mem' = runs stopped at the memory limit."))
 
     # ---- T9: channels and interactions (headline cell) ------------------------
     if head is not None:

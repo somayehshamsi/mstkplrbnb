@@ -29,7 +29,8 @@ import final_suite as FS  # noqa: E402
 
 LR_REQUIRED = ["status", "solved", "obj", "final_lb", "root_lb", "wall_time", "cpu_time",
                "nodes", "lr_iterations", "root_lr_iterations", "probes", "sep_time", "cuts_separated",
-               "exact_dual_nodes", "rc_edges_excluded", "indicator_calls", "indicator_time"]
+               "exact_dual_nodes", "rc_edges_excluded", "indicator_calls", "indicator_time",
+               "plain_dual_calls", "plain_dual_msts", "mst_evaluations"]
 GRB_REQUIRED = ["status", "solved", "obj", "final_lb", "root_lb", "wall_time", "nodes",
                 "build_time", "grb_runtime", "formulation"]
 OK_STATUSES = {"optimal", "timeout", "memory"}   # memory = stopped at the memory limit, with bounds
@@ -77,6 +78,7 @@ def main():
     jobs = FS.expand_jobs(a.profile, root, FS.parse_families(a.family))
     agg = {}          # (cell, cfg) -> accumulated behaviour
     zs = {}
+    lstar = {}        # (cell, idx) -> L* from the instance file
     hashes = set()
     for j in jobs:
         rp = FS.p_result(root, j.cell["id"], j.cfg, j.idx)
@@ -127,6 +129,33 @@ def main():
                 f"{lab}: {mt.get('root_lr_iterations')} root iterations > budget {want_root}")
         for k in ("rank_lift", "exact_cut_dual", "use_rc_fixing", "frac_source"):
             R.check(eff.get(k) == cfg[k], f"{lab}: node solver {k}={eff.get(k)} != {cfg[k]}")
+        # REVISION: the exact plain dual is on exactly where configured, in the
+        # node solver and in the probe solver, and it really ran.
+        want_epd = bool(cfg.get("exact_plain_dual", False))
+        R.check(bool(eff.get("exact_plain_dual")) == want_epd,
+                f"{lab}: node solver exact_plain_dual={eff.get('exact_plain_dual')} != {want_epd}")
+        if peff:
+            R.check(bool(peff.get("exact_plain_dual")) == want_epd,
+                    f"{lab}: PROBE solver exact_plain_dual={peff.get('exact_plain_dual')} != {want_epd}")
+        R.check((mt.get("plain_dual_calls", 0) > 0) == want_epd,
+                f"{lab}: plain_dual_calls={mt.get('plain_dual_calls')} with exact_plain_dual={want_epd}")
+        R.check(abs(float(eff.get("cut_phase_frac", 3.0)) - float(cfg.get("cut_phase_frac", 3.0))) < 1e-12,
+                f"{lab}: cut_phase_frac={eff.get('cut_phase_frac')} != {cfg.get('cut_phase_frac', 3.0)}")
+        # REVISION: with the exact plain dual the root bound reaches L* (the
+        # plain Lagrangian bound stored with the instance), unless the root
+        # was cut short by the time limit or the MST cap.
+        if want_epd and mt.get("root_lb") is not None and not cfg.get("cutoff"):
+            ik = (j.cell["id"], j.idx)
+            if ik not in lstar:
+                lstar[ik] = (FS.load_instance(FS.p_inst(root, *ik)).meta or {}).get("plain_lr_bound")
+            Ls = lstar[ik]
+            if Ls is not None and not mt.get("plain_dual_capped"):
+                R.check(float(mt["root_lb"]) >= Ls - 1e-6 * max(1.0, abs(Ls)),
+                        f"{lab}: root_lb {mt['root_lb']} < L* {Ls} with the exact plain dual")
+        if want_epd:
+            R.note(not mt.get("plain_dual_capped"),
+                   f"{lab}: exact plain dual hit its MST cap {mt.get('plain_dual_capped')} times "
+                   f"(bound still valid, not certified optimal there)")
         if cfg["cover_cuts"]:
             R.check(eff.get("cut_strengthening") == cfg["cut_strengthening"], f"{lab}: strength")
             R.check(eff.get("max_active_cuts") == cfg["max_active_cuts"], f"{lab}: pool cap")

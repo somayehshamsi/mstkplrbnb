@@ -85,6 +85,13 @@ def summary(df, cfgs):
             "sgm_lr_iters_common": sgm(cs.get("lr_iterations", pd.Series(dtype=float)), SHIFT_N),
             "median_root_iters": float(g["root_lr_iterations"].median())
             if "root_lr_iterations" in g else np.nan,
+            # REVISION: the work measure that is comparable across the two
+            # duals -- MST computations (subgradient steps + exact-dual MSTs).
+            "sgm_mst_evals_common": sgm(cs["mst_evaluations"], SHIFT_N)
+            if "mst_evaluations" in cs and cs["mst_evaluations"].notna().any() else np.nan,
+            "median_root_msts": float((g["root_lr_iterations"].fillna(0)
+                                       + g["root_plain_dual_msts"].fillna(0)).median())
+            if "root_plain_dual_msts" in g and "root_lr_iterations" in g else np.nan,
             "share_root_below_Lstar": float(g.loc[g["root_lb"].notna(), "root_below_lstar"].mean())
             if g["root_lb"].notna().any() else np.nan,
             "median_root_gap_pct": float(g["root_gap_pct"].median()),
@@ -191,12 +198,13 @@ def comparisons(family, cfgs):
         var = "cutoff" if family == "ACUT" else ""
         ids = [FS.lr_config_id(r, rule, variant=var) for r in FS.LADDER6]
         pairs = list(zip(ids[:-1], ids[1:])) + [(ids[0], ids[-1])]
-        # equal-dual-effort reading of the ladder (controls present in A / G):
-        # R1 against R0 with R1's root budget, R2 and R5 against R0 with their
-        # node budget
-        it20 = FS.lr_config_id("R0", rule, variant="it20")
-        rit = FS.lr_config_id("R0", rule, variant="rit40")
-        pairs += [(ids[0], rit), (rit, ids[1]), (ids[0], it20), (it20, ids[2]), (it20, ids[5])]
+        # REVISION: no iteration-matched controls any more (the plain dual is
+        # exact); A also carries the first study's subgradient dual for R0
+        # and R5, compared with the exact dual on the same instances.
+        if family == "A":
+            pairs += [(FS.lr_config_id("R0", "rel", variant="subgr"), ids[0]),
+                      (FS.lr_config_id("R5", "rel", variant="subgr"), ids[5]),
+                      (ids[0], ids[2])]
         return pairs
     if family == "E":
         return [(FS.lr_config_id("R2", "rel"), FS.lr_config_id("R2", "rel", variant="noexact")),
@@ -206,29 +214,31 @@ def comparisons(family, cfgs):
     if family in ("B", "BL", "D", "C", "H", "L", "W"):
         lad = [c for c in rel(FS.LADDER5) if c in cfgs]
         pairs = list(zip(lad[:-1], lad[1:])) + [(lad[0], lad[-1])]
-        it20 = FS.lr_config_id("R0", "rel", variant="it20")
-        pairs += [(lad[0], it20)] + [(it20, c) for c in lad[1:]]
-        pairs += [(g, FS.lr_config_id("R5", "rel")) for g in cfgs if g.startswith("GRB-")]
+        # REVISION: Gurobi against both the cut-free rung and R5
+        for g in [c for c in cfgs if c.startswith("GRB-")]:
+            pairs += [(g, FS.lr_config_id("R0", "rel")), (g, FS.lr_config_id("R5", "rel"))]
         return pairs
     if family == "F":
-        t = lambda r, s="dw": FS.lr_config_id("R5", r, s)
-        pairs = [(FS.lr_config_id("R5", "rmst"), t("rfrac")), (FS.lr_config_id("R5", "rmst"),
-                 t("rfrac", "avg")), (t("rfrac"), t("rfrac", "avg")),
-                 (FS.lr_config_id("R5", "sbmst"), t("sbf")),
-                 (FS.lr_config_id("R5", "sbmst"), t("sbf", "avg"))]
-        pairs += [(t(r), t(r, "avg")) for r in ("mf", "pc", "sbf", "rel", "hyb")]
-        pairs += [(t("rel"), t(r)) for r in ("mf", "pc", "sbf", "hyb")]
+        # REVISION: the same comparisons on each branching rung (R0 and R5),
+        # DW indicator only
+        pairs = []
+        for rung in FS.BRANCH_RUNGS:
+            t = lambda r, s="dw": FS.lr_config_id(rung, r, s)
+            pairs += [(FS.lr_config_id(rung, "rmst"), t("rfrac")),
+                      (FS.lr_config_id(rung, "sbmst"), t("sbf"))]
+            pairs += [(t("rel"), t(r)) for r in ("mf", "pc", "sbf", "hyb", "rfrac")]
         return pairs
     if family == "X":
-        c = lambda r, v: FS.lr_config_id(r, "rel", variant=v)
-        return [(FS.lr_config_id("R5", "rel"), c("R5", "it20")),   # does the budget fix R5
-                (c("R0", "it20"), c("R0", "it40")), (c("R0", "it40"), c("R0", "it80")),
-                (c("R0", "it20"), c("R5", "it20")),                # cuts on top of the budget
-                (c("R0", "it80"), c("R2", "it20")),                # equal dual effort
-                (c("R0", "it80"), c("R5", "it20")),
-                (c("R2", "it20"), c("R5", "it20"))]                # strengthening, high budget
+        # REVISION: new fresh instances
+        c = lambda r, v="": FS.lr_config_id(r, "rel", variant=v)
+        return [(c("R2"), c("R5")),                                # strengthened vs literature
+                (c("R0"), c("R2")), (c("R0"), c("R5")),            # cuts vs none
+                (c("R5"), c("R5", "cp2")), (c("R5"), c("R5", "cp1")),   # shorter cut phase
+                (c("R0"), c("R5", "cp1")),
+                ("GRB-DCUT", c("R0")), ("GRB-DCUT", c("R5"))]      # Gurobi on unseen instances
     if family == "AGRB":
-        return [(g, FS.lr_config_id("R5", "rel")) for g in cfgs]
+        return ([(g, FS.lr_config_id("R0", "rel")) for g in cfgs]
+                + [(g, FS.lr_config_id("R5", "rel")) for g in cfgs])
     return []
 
 

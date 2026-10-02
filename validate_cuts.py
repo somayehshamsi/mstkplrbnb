@@ -175,6 +175,13 @@ def main():
             for bound in ("root_lb", "final_lb"):
                 if r[bound] is not None and r[bound] > bf.zstar + 1e-6:
                     report["failures"].append(f"{tag}: {bound} {r[bound]} > z* {bf.zstar}")
+            # REVISION: with the exact plain dual the root bound is at least L*
+            # (equal to it without cuts), computed independently here.
+            if cfg.get("exact_plain_dual") and r["root_lb"] is not None:
+                if r["root_lb"] < Ls - 1e-6 * max(1.0, abs(Ls)):
+                    report["failures"].append(f"{tag}: root_lb {r['root_lb']} < L* {Ls} "
+                                              f"with the exact plain dual")
+                C["exact_root_checks"] = C.get("exact_root_checks", 0) + 1
             if not cfg.get("cutoff"):
                 ok, why = FS.verify_solution(FS.StoredInstance({
                     "num_nodes": inst.num_nodes, "budget": inst.budget,

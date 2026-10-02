@@ -6,9 +6,9 @@
 #   bash run_final.sh validate     experiment V (brute-force correctness, ~5 min)
 #   bash run_final.sh smoke        full pipeline on small graphs (~30-60 min)
 #   bash run_final.sh final        the whole final suite, stage by stage
-#   bash run_final.sh optional     optional families (O1, O2, GLAZY)
+#   bash run_final.sh optional     optional families (O2, GLAZY; O1 is empty now)
 #   bash run_final.sh confirm      confirmation family X on fresh instances
-#   bash run_final.sh curve        budget curve (5 / 10 iterations) on X's instances
+#   bash run_final.sh curve        (removed in the revision; does nothing)
 #   bash run_final.sh paper        pooled tests + paper-ready tables
 #   bash run_final.sh status       progress per family
 #   bash run_final.sh report       collect + checks + analysis
@@ -109,8 +109,8 @@ PYEOF
   final)
     run_pipeline "$FS" "$ROOT" ;;
   optional)
-    $FS generate --family O1,O2,GLAZY --jobs "$GEN_JOBS"
-    $FS run --family O1,O2,GLAZY --jobs "$JOBS" --mem-budget "$MEM" ;;
+    $FS generate --family O2,GLAZY --jobs "$GEN_JOBS"
+    $FS run --family O2,GLAZY --jobs "$JOBS" --mem-budget "$MEM" ;;
   confirm)
     # Confirmation family X on fresh instances (after the core suite).
     $FS generate --family X --jobs "$GEN_JOBS"
@@ -121,13 +121,10 @@ PYEOF
     $PY analyze_final.py --root "$ROOT" --profile final --family X
     exit "$rc" ;;
   curve)
-    # Budget curve (R0 with 5 and 10 iterations per node) on X's fresh instances.
-    $FS generate --family XB --jobs "$GEN_JOBS"
-    $FS run --family XB --jobs "$JOBS" --mem-budget "$MEM"
-    $FS collect --family XB || echo "!! collect reported integrity problems (see above)"
-    rc=0
-    $PY smoke_check.py --root "$ROOT" --profile final --family XB || rc=$?
-    exit "$rc" ;;
+    # REVISION: the first study's budget curve (R0 with 5 / 10 iterations)
+    # is not repeated -- with the exact plain dual R0 has no iteration
+    # budget left to vary.  Family XB is empty.
+    echo "curve: removed in the revision (family XB is empty); nothing to run." ;;
   paper)
     # Pooled confirmation tests and paper-ready tables (reads tables/ only).
     $PY paper_tables.py --root "$ROOT" --profile final ;;

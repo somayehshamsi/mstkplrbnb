@@ -80,6 +80,11 @@ class LagrangianMST:
     exact_dual_gain = 0.0  # total bound raised by the exact cut dual
     lr_iterations = 0      # subgradient iterations actually executed,
                            # node solves and strong-branching probes alike
+    # Exact plain dual (REVISION: replaces the subgradient lambda phase when
+    # `exact_plain_dual` is set on the solver).
+    plain_dual_calls = 0   # node solves + probes that ran the exact plain dual
+    plain_dual_msts = 0    # MST computations spent inside it
+    plain_dual_capped = 0  # ... that hit exact_plain_max_msts before certifying
 
     # Frozen-benchmark instrumentation (all reset per run by reset_cut_stats).
     # Paper metrics: separation and indicator time/volume and the indicator
@@ -1674,6 +1679,112 @@ class LagrangianMST:
         cls.indicator_none = 0
         cls.indicator_time = 0.0
         cls.pool_hist = {}
+        cls.plain_dual_calls = 0
+        cls.plain_dual_msts = 0
+        cls.plain_dual_capped = 0
+
+    # ------------------------------------------------------------------
+    # REVISION: exact plain (cut-free) dual by the breakpoint method
+    # ------------------------------------------------------------------
+    def _exact_plain_dual(self, lam_start, max_msts=60, tol=1e-9):
+        """max over lambda >= 0 of L(lambda) = min_T w(T) + lambda (l(T) - B)
+        on THIS node's reduced graph (F+ forced in, F- removed), computed
+        exactly by the breakpoint (Newton) method on two supporting trees:
+        a budget-violating T- and a budget-feasible T+.  The next multiplier
+        is where their Lagrangian lines meet; the MST there replaces T- or
+        T+; the method stops when that MST attains the common value of the
+        two lines, which certifies that lambda maximises L.  One MST per
+        step, warm-started from `lam_start` (the parent's multiplier).
+
+        Cut multipliers are NOT used here (the caller parks them at zero).
+
+        Returns None when the node admits no budget-feasible spanning tree
+        (a proof of infeasibility), else a dict with
+          lam, bound, edges, idx   the multiplier, its bound and an MST at lam
+          trees                    every tree evaluated, as (edges, idx, w, l)
+          msts, exact              MSTs spent, and whether lam was certified
+        """
+        W = self.edge_weights
+        Lg = self.edge_lengths
+        B = float(self.budget)
+        trees = []
+        state = {"n": 0, "best": None}
+
+        def tree_at(lam):
+            state["n"] += 1
+            cost, length, edges, idx = self._mst_core(W + lam * Lg if lam > 0.0 else W)
+            if not edges:
+                return None
+            w = float(W[idx].sum())
+            trees.append((edges, idx, w, float(length)))
+            val = w + lam * (float(length) - B)
+            if state["best"] is None or val > state["best"][0]:
+                state["best"] = (val, lam, edges, idx)
+            return w, float(length)
+
+        def result(exact):
+            val, lam, edges, idx = state["best"]
+            return {"lam": float(lam), "bound": float(val), "edges": edges, "idx": idx,
+                    "trees": trees, "msts": state["n"], "exact": bool(exact)}
+
+        lam0 = max(0.0, min(float(lam_start), 1e4))
+        t0 = tree_at(lam0)
+        if t0 is None:
+            return None                      # no spanning tree at all
+        lo = hi = None                       # (w, l) with l > B / with l <= B
+        if t0[1] > B:
+            lo = t0
+            lam, step = lam0, max(1e-3, 0.05 * lam0)
+            while hi is None and state["n"] < max_msts and lam < 1e4:
+                lam = min(1e4, lam + step)
+                t = tree_at(lam)
+                if t[1] <= B:
+                    hi = t
+                else:
+                    lo = t
+                    step *= 2.0
+            if hi is None:
+                # The minimum-length completion decides feasibility.
+                state["n"] += 1
+                _c, length, edges, idx = self._mst_core(Lg + 1e-9 * W)
+                if not edges or float(length) > B + 1e-9:
+                    return None              # no budget-feasible tree in this node
+                w = float(W[idx].sum())
+                trees.append((edges, idx, w, float(length)))
+                hi = (w, float(length))
+        else:
+            hi = t0
+            if lam0 == 0.0:
+                return result(True)          # budget slack: lambda* = 0
+            lam, step = lam0, max(1e-3, 0.05 * lam0)
+            while lo is None and state["n"] < max_msts:
+                lam = max(0.0, lam - step)
+                t = tree_at(lam)
+                if t[1] > B:
+                    lo = t
+                else:
+                    hi = t
+                    if lam == 0.0:
+                        return result(True)  # feasible at 0: lambda* = 0
+                    step *= 2.0
+            if lo is None:
+                return result(False)
+
+        while state["n"] < max_msts:
+            (wl, ll), (wh, lh) = lo, hi      # ll > B >= lh
+            lam = max(0.0, min((wh - wl) / (ll - lh), 1e4))
+            t = tree_at(lam)
+            line = wl + lam * (ll - B)
+            val = t[0] + lam * (t[1] - B)
+            if val >= line - tol * max(1.0, abs(line)):
+                # Certified: report the bound at lam with an MST at lam.
+                state["best"] = (val, lam, trees[-1][0], trees[-1][1])
+                return result(True)
+            if t[1] > B:
+                lo = t
+            else:
+                hi = t
+        return result(False)
 
     def compute_modified_weights(self):
         """Edge weights priced by the current multipliers:
@@ -3301,6 +3412,64 @@ class LagrangianMST:
                     self.best_cut_multipliers[i] = 0.0
                 self._invalidate_weight_cache()
 
+            # ------------------------------------------------------------------
+            # 4b) REVISION: exact plain dual instead of the lambda phase
+            #
+            # With every cut multiplier parked at zero the node dual is the
+            # one-dimensional cut-free dual, which _exact_plain_dual solves
+            # exactly.  Its bound, multiplier and trees take the place of
+            # everything phase 1 used to produce, and the subgradient loop
+            # below then runs the cut phase only (no iterations at all
+            # without cuts).
+            # ------------------------------------------------------------------
+            exact_plain_done = False
+            if getattr(self, "exact_plain_dual", False):
+                LagrangianMST.plain_dual_calls += 1
+                _pd = self._exact_plain_dual(
+                    lam_at_entry, int(getattr(self, "exact_plain_max_msts", 60))
+                )
+                if _pd is None:
+                    end_time = time()
+                    LagrangianMST.total_compute_time += end_time - start_time
+                    return float("inf"), self.best_upper_bound, node_new_cuts
+                LagrangianMST.plain_dual_msts += _pd["msts"]
+                if not _pd["exact"]:
+                    LagrangianMST.plain_dual_capped += 1
+
+                # Every tree is a column for the Dantzig-Wolfe indicator, and a
+                # budget-feasible one is a candidate incumbent.
+                for _edges, _idx, _w, _l in _pd["trees"]:
+                    _feas = _l <= self.budget
+                    self._record_primal_solution(_edges, _feas)
+                    if _feas and _w < self.best_upper_bound:
+                        self.best_upper_bound = _w
+                        self.best_feasible_edges = list(_edges)
+
+                if _pd["bound"] > self.best_lower_bound + 1e-6:
+                    self.best_lower_bound = _pd["bound"]
+                    self.best_lambda = _pd["lam"]
+                    self.best_mst_edges = _pd["edges"]
+                    self.best_cost = _pd["bound"] + _pd["lam"] * self.budget
+                    self.best_cut_multipliers_for_best_bound = (
+                        self.best_cut_multipliers.copy()   # all parked at 0
+                    )
+
+                self.lmbda = _pd["lam"]
+                self.last_mst_edges = _pd["edges"]
+                self._last_mst_idx = _pd["idx"]
+                self._last_mst_list = _pd["edges"]
+                self._invalidate_weight_cache()
+
+                lam_phase_iters = 0
+                total_iters = cut_phase_iters
+                exact_plain_done = True
+
+                _dbg(
+                    f"Exact plain dual: lambda*={_pd['lam']:.9g}, "
+                    f"L*={_pd['bound']:.9g}, msts={_pd['msts']}, exact={_pd['exact']}",
+                    force=True,
+                )
+
             # Separation follows Algorithm 2 line 10: every budget-violating
             # tree produced by the multiplier sequence yields one seed cover.
             # Trees already separated on are skipped, and the active-pool cap
@@ -3351,6 +3520,15 @@ class LagrangianMST:
                         self.lmbda = lam_at_entry
                     elif hasattr(self, "best_lambda"):
                         self.lmbda = max(0.0, min(float(self.best_lambda), 1e4))
+                        if exact_plain_done:
+                            # REVISION: open the cut phase just below lambda*.
+                            # There the MST is the budget-VIOLATING supporting
+                            # tree, so separation has a seed; at lambda* itself
+                            # the tie can resolve to the feasible tree, which
+                            # violates no cover and would end the phase.
+                            # Breakpoints of L are at least ~7e-9 apart for
+                            # integer data up to 12000, so 1e-9 crosses none.
+                            self.lmbda = max(0.0, self.lmbda - 1e-9)
 
                     # Re-denominate the mu step in the weights it is actually
                     # added to.  weight_scale was fixed from the node's ENTRY

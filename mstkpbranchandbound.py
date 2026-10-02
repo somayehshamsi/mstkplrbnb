@@ -314,6 +314,10 @@ class MSTNode(Node):
                 "exact_cut_rounds",
                 "exact_cut_max",
                 "dual_seed",
+                # REVISION: probes solve the cut-free child dual exactly too,
+                # so their bounds are commensurate with the node bounds.
+                "exact_plain_dual",
+                "exact_plain_max_msts",
             }
             _sb_overrides = {
                 k: v for k, v in self.solver_overrides.items()
@@ -349,6 +353,12 @@ class MSTNode(Node):
                 solver.cut_phase_frac = float(
                     self.solver_overrides.get("sb_cut_phase_frac", 0.0)
                 )
+                # REVISION: optional cap on the probe's exact plain dual
+                # (MST computations); by default the same as a node's.
+                if "sb_exact_plain_max_msts" in self.solver_overrides:
+                    solver.exact_plain_max_msts = int(
+                        self.solver_overrides["sb_exact_plain_max_msts"]
+                    )
                 return solver
 
             MSTNode._solver_pool = SolverPool(_factory, size=1)

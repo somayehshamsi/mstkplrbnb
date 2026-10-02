@@ -1,10 +1,40 @@
 # Frozen final benchmark (MSTKP / LR-BnB)
 
+## Revision (exact plain dual) -- read first
+
+The revision changes one thing in the solver: at every node and every
+strong-branching probe, the Lagrangian dual of the budget constraint
+(no cuts yet) is solved **exactly** by a breakpoint (Newton / Dinkelbach)
+search over spanning trees, instead of a few clipped subgradient steps.
+The cut phase (R1-R5) then starts from that optimal lambda as before.
+`exact_plain_dual = True` is the default in every configuration; the
+variant `-subgr` restores the first study's dual (bit-identical results)
+as a reference.  New / changed configurations and families:
+
+* `R0-rel-dw-subgr`, `R5-rel-dw-subgr` (family A): the first study's dual.
+* `R5-rel-dw-cp2`, `R5-rel-dw-cp1` (family X): cut phase 2x / 1x max_iter
+  instead of 3x.
+* F: eight branching rules (DW indicator) on R0 **and** on R5.
+* X: a NEW fresh instance set (seed groups `confirm2_*`): R0, R2, R5,
+  R5-cp2, R5-cp1, Gurobi DCUT.
+* Removed (empty): the iteration-matched controls (R0-rit40, R0-it20,
+  R0-it80), O1, XB / `curve` and the budget-curve figure F3 -- with the
+  exact dual R0 runs no subgradient iterations, so there is no per-node
+  budget on lambda left to vary.
+* New metrics: `plain_dual_calls`, `plain_dual_msts`, `plain_dual_capped`,
+  `root_plain_dual_msts`, `mst_evaluations` (= subgradient iterations +
+  exact-dual MSTs; the work measure reported as "MSTs / node").
+* Checks: V and the smoke test assert root_lb >= L* whenever the exact
+  dual is on.
+
+`DESIGN_VERSION` is unchanged, so every instance of families A-W is
+regenerated bit-identically; run the revision under a NEW root.
+
 ## Files
 
 | file | status | role |
 |---|---|---|
-| `lagrangianrelaxation.py` | modified | instrumentation only (separation / indicator time, pool histogram, usage counters, cut log for V) |
+| `lagrangianrelaxation.py` | modified | instrumentation (separation / indicator time, pool histogram, usage counters, cut log for V); **revision: exact plain dual `_exact_plain_dual`** |
 | `mstkpbranchandbound.py` | modified | **probe-override fix**, cutoff mode, probe / forced-decision counters |
 | `mstkpinstance.py` | modified | correlation is an explicit argument (instances bit-identical); lazy matplotlib |
 | `benchmark_mstkp_.py` | rewritten | single-run engine `run_lrbnb()`; old driver removed |
@@ -82,17 +112,17 @@ LR-BnB checks still run).
 
 * **V** brute force on n = 7, 8: every generated cut (probes included)
   valid, every optimum and bound correct, Gurobi formulations agree.
-* **A** headline ladder R0-R5 (n = 300, d = 0.05, beta = 0.15) plus the
-  iteration-matched controls R0-rit40 (R1's budget) and R0-it20 (R2-R5's).
+* **A** headline ladder R0-R5 (n = 300, d = 0.05, beta = 0.15) plus R0 and
+  R5 with the first study's subgradient dual (`-subgr`).
 * **G** the ladder under most-fractional: no probes.
 * **ACUT** the ladder with UB = z* for pruning/RC fixing: no primal channel.
 * **E** exact cut dual off (R2, R5) and RC fixing off (R0, R5).
 * **AGRB / D / C** Gurobi comparison; correlation sweep; scaling at
   average degree 14.95.
 * **B** density x beta grid.
-* **CAL -> select-beta -> F** branching rules x indicator source.
+* **CAL -> select-beta -> F** eight branching rules (DW indicator) on R0 and on R5.
 * **H** dense end: complete graphs n = 200-500 (up to 124 750 edges), beta
-  0.5 / 0.15; R0, R2 (literature), R5 (yours), matched R0, Gurobi SCF / DCUT.
+  0.5 / 0.15; R0, R2 (literature), R5 (yours), Gurobi SCF / DCUT.
 * **L** large sparse end: n = 1000, 2000, 4000, 8000 at average degree 14.95
   (up to ~60 000 edges); same configurations as H.  Large and dense graphs
   have tiny Lagrangian gaps, so H and L show that the method scales, while
@@ -102,24 +132,22 @@ LR-BnB checks still run).
   per cell; configurations as H.
 * **BL** loose budgets beta 0.50, 0.70 on exactly B's graphs (n = 300,
   d = 0.05 / 0.10 / 0.20): with B one budget sweep from 0.10 to 0.70.
-* optional **O1, O2, GLAZY**.
-* **X** confirmation, added after the core results, on FRESH instances (seed
-  groups never used elsewhere): R5 as designed, R0 with 20 / 40 / 80 dual
-  iterations per node, and R2 / R5 with max_iter 20 (80 iterations per node
-  including the cut phase, so R0-it80 is their equal-effort control).  Cells:
-  headline; loose budgets (d 0.10 / 0.20, beta 0.70); complete graphs n 200 /
-  300 at beta 0.5; degree-150 graphs n 500 / 1000 at beta 0.5; n 2000 sparse.
+* optional **O2, GLAZY** (O1 is empty in the revision).
+* **X** confirmation on a NEW fresh set (seed groups `confirm2_*`, used
+  nowhere else and never by the first study): R0, R2, R5, R5 with a cut
+  phase of 2x and 1x max_iter, and Gurobi DCUT.  Cells: headline; loose
+  budgets (d 0.10 / 0.20, beta 0.70); complete graphs n 200 / 300 at beta
+  0.5; degree-150 graphs n 500 / 1000 at beta 0.5; n 2000 sparse.
   `bash run_final.sh confirm`.
-* **XB** budget curve on exactly X's instances: R0 with 5 (default) and 10
-  iterations per node, completing 5 / 10 / 20 / 40 / 80.  `bash run_final.sh curve`.
+* **XB** empty in the revision (`bash run_final.sh curve` does nothing).
 
 Paper tables: `bash run_final.sh paper` writes ROOT/paper/ (Markdown, LaTeX,
 CSV): pooled confirmation tests over all fresh instances (stratified
-bootstrap, Holm), the budget curve, the headline ladder, your cuts vs the
+bootstrap, Holm), the headline ladder, your cuts vs the
 literature in every cell, LR-BnB vs Gurobi, branching, components, outcomes,
 the dual budget / robustness in every core cell, the probe and primal channels,
 the remaining gaps of unsolved runs, calibration and validation facts, and
-figures (performance profile, scaling, budget curve) as PDF and PNG.
+figures (performance profile, scaling, cells) as PDF and PNG.
 
 Coverage: n from 200 to 8000; average degree from 15 to complete (up to
 150 000 edges); beta from 0.08 to 0.70; correlation from +0.5 to -0.9.

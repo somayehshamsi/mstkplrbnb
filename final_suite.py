@@ -840,7 +840,7 @@ def mem_reservation_gb(job):
     cfg = make_config(job.cfg)
     n, m = job.cell["n"], expected_m(job.cell)
     # One limit per INSTANCE, the same for every solver: 16 GB, or more on
-    # graphs large enough to need it (only m > ~44 000 edges).
+    # graphs large enough to need it (only m > 87 500 edges).
     inst_limit = max(RUN_MEM_LIMIT_GB, 2.0 * (1.0 + m / 12500.0))
     if cfg["solver"] == "gurobi":
         from gurobi_baselines import estimate_memory_gb

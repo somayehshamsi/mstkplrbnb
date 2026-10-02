@@ -6,7 +6,13 @@ The revision changes one thing in the solver: at every node and every
 strong-branching probe, the Lagrangian dual of the budget constraint
 (no cuts yet) is solved **exactly** by a breakpoint (Newton / Dinkelbach)
 search over spanning trees, instead of a few clipped subgradient steps.
-The cut phase (R1-R5) then starts from that optimal lambda as before.
+The cut phase (R1-R5) then starts from (lambda*, mu = 0), or, at a node
+that inherits cut multipliers, from the parent's (lambda, mu) after both
+points have been priced; the node bound is the better of the two.  In
+the cut phase lambda keeps the first study's step rule (at most 0.02 per
+iteration), as do the `-subgr` reference rows.  The branching study uses
+the Dantzig-Wolfe indicator only: R0 runs no subgradient steps, so the
+averaged indicator has nothing to average.
 `exact_plain_dual = True` is the default in every configuration; the
 variant `-subgr` restores the first study's dual (bit-identical results)
 as a reference.  New / changed configurations and families:
@@ -152,7 +158,7 @@ figures (performance profile, scaling, cells) as PDF and PNG.
 Coverage: n from 200 to 8000; average degree from 15 to complete (up to
 150 000 edges); beta from 0.08 to 0.70; correlation from +0.5 to -0.9.
 Memory limit: one per instance for every solver (16 GB, more only for
-graphs with more than ~44 000 edges).  A run that reaches it stops cleanly
+graphs with more than 87 500 edges: limit = max(16, 2 (1 + m / 12 500)) GB).  A run that reaches it stops cleanly
 with its bounds (status `memory`): Gurobi through SoftMemLimit, LR-BnB
 through the same stop its time limit uses.  If the whole machine runs short
 of memory, the runner stops its largest job and reruns it later, so no

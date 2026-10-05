@@ -3445,6 +3445,17 @@ class LagrangianMST:
                         self.best_upper_bound = _w
                         self.best_feasible_edges = list(_edges)
 
+                # CLASSICAL BASELINE: the cheapest budget-feasible tree among
+                # this node's dual trees -- the "best feasible tree on the
+                # node's frontier" along which Aggarwal et al. (1982)
+                # partition a node.  Read only by the feasible_tree branching
+                # rule; nothing else uses it.
+                _feas_trees = [(_w, _edges) for _edges, _idx, _w, _l in _pd["trees"]
+                               if _l <= self.budget]
+                self.node_feasible_tree = (
+                    list(min(_feas_trees, key=lambda t: t[0])[1]) if _feas_trees else None
+                )
+
                 if _pd["bound"] > self.best_lower_bound + 1e-6:
                     self.best_lower_bound = _pd["bound"]
                     self.best_lambda = _pd["lam"]

@@ -42,6 +42,8 @@ _SOLVER_KEYS = [
     ("mu_init", 0.0), ("cut_phase_frac", 3.0), ("root_max_iter", None),
     # REVISION: exact plain dual
     ("exact_plain_dual", False), ("exact_plain_max_msts", 60),
+    # CLASSICAL BASELINE: depth limit of reduced-cost fixing (None = every node)
+    ("rc_fix_max_depth", None),
 ]
 # Probes only need the cut-shaping ones.
 _PROBE_KEYS = ["cut_strengthening", "max_active_cuts", "max_cut_depth",
@@ -101,6 +103,10 @@ def build_overrides(config):
         "exact_plain_max_msts": int(config.get("exact_plain_max_msts", 60)),
         "cut_phase_frac": float(config.get("cut_phase_frac", 3.0)),
     }
+    # CLASSICAL BASELINE: only configurations that declare it get the key, so
+    # every other configuration builds exactly the overrides it did before.
+    if config.get("rc_fix_max_depth") is not None:
+        ov["rc_fix_max_depth"] = int(config["rc_fix_max_depth"])
     if config.get("root_max_iter") is not None:
         ov["root_max_iter"] = int(config["root_max_iter"])
     if config["cover_cuts"]:

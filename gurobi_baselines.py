@@ -104,6 +104,9 @@ def run_gurobi(instance, formulation, time_limit, mem_limit_gb=None, seed=0,
         "status": "error", "solved": False, "obj": None, "final_lb": None,
         "root_lb": None, "nodes": None, "build_time": None, "grb_runtime": None,
         "user_cuts": 0, "lazy_cuts": 0, "solution_edges": None,
+        # Time spent inside the Python callback: all of it, and the part that
+        # separates cut-set inequalities (MIPSOL lazy + MIPNODE user cuts).
+        "callback_time": 0.0, "sep_callback_time": 0.0, "callback_calls": 0,
     }
 
     env = gp.Env(empty=True)
@@ -187,7 +190,8 @@ def run_gurobi(instance, formulation, time_limit, mem_limit_gb=None, seed=0,
 
         xs = x.tolist()
         ys = y.tolist() if y is not None else None
-        state = {"root_bnd": None, "user": 0, "lazy": 0}
+        state = {"root_bnd": None, "user": 0, "lazy": 0,
+                 "cb_time": 0.0, "sep_time": 0.0, "cb_calls": 0}
         SCALE = 10 ** 6
         tails_l, heads_l = tails.tolist(), heads.tolist()
         U_l, V_l = U.tolist(), V.tolist()
@@ -222,6 +226,18 @@ def run_gurobi(instance, formulation, time_limit, mem_limit_gb=None, seed=0,
             return gp.quicksum(xs[e] for e in es.tolist())
 
         def cb(model_, where):
+            # Timing wrapper around the unchanged callback body (_cb).
+            t_cb = time.perf_counter()
+            try:
+                _cb(model_, where)
+            finally:
+                dt = time.perf_counter() - t_cb
+                state["cb_time"] += dt
+                state["cb_calls"] += 1
+                if where in (GRB.Callback.MIPSOL, GRB.Callback.MIPNODE):
+                    state["sep_time"] += dt
+
+        def _cb(model_, where):
             if where == GRB.Callback.MIP:
                 if model_.cbGet(GRB.Callback.MIP_NODCNT) < 0.5:
                     state["root_bnd"] = model_.cbGet(GRB.Callback.MIP_OBJBND)
@@ -288,6 +304,9 @@ def run_gurobi(instance, formulation, time_limit, mem_limit_gb=None, seed=0,
         out["grb_runtime"] = float(model.Runtime)
         out["nodes"] = float(model.NodeCount)
         out["user_cuts"], out["lazy_cuts"] = state["user"], state["lazy"]
+        out["callback_time"] = float(state["cb_time"])
+        out["sep_callback_time"] = float(state["sep_time"])
+        out["callback_calls"] = int(state["cb_calls"])
         try:
             out["final_lb"] = float(model.ObjBound)
         except Exception:

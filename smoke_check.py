@@ -129,6 +129,10 @@ def main():
                 f"{lab}: {mt.get('root_lr_iterations')} root iterations > budget {want_root}")
         for k in ("rank_lift", "exact_cut_dual", "use_rc_fixing", "frac_source"):
             R.check(eff.get(k) == cfg[k], f"{lab}: node solver {k}={eff.get(k)} != {cfg[k]}")
+        # CLASSICAL BASELINE: depth limit of reduced-cost fixing (None = every node)
+        R.check(eff.get("rc_fix_max_depth") == cfg.get("rc_fix_max_depth"),
+                f"{lab}: node solver rc_fix_max_depth={eff.get('rc_fix_max_depth')} "
+                f"!= {cfg.get('rc_fix_max_depth')}")
         # REVISION: the exact plain dual is on exactly where configured, in the
         # node solver and in the probe solver, and it really ran.
         want_epd = bool(cfg.get("exact_plain_dual", False))
@@ -182,9 +186,9 @@ def main():
             R.check(mt["rc_edges_excluded"] == 0 and mt["rc_edges_fixed"] == 0,
                     f"{lab}: RC fixing ran with use_rc_fixing=False")
         tag = cfg["rule_tag"]
-        if tag in ("rmst", "sbmst"):
+        if tag in ("rmst", "sbmst", "ftree"):
             R.check(mt["indicator_calls"] == 0, f"{lab}: MST rule built an indicator")
-        if tag in ("rmst", "mf", "rfrac", "pc"):
+        if tag in ("rmst", "mf", "rfrac", "pc", "ftree"):
             R.check(mt["probes"] == 0, f"{lab}: rule without probes ran {mt['probes']} probes")
         if cfg.get("cutoff"):
             R.check(mt.get("cutoff") is not None and dg.get("step_reference") is not None,
@@ -216,7 +220,7 @@ def main():
         lab = f"{cid}/{c}"
         if cfg["rule_tag"] in ("rel", "sbf", "hyb", "sbmst"):
             R.check(A["probes"] > 0, f"{lab}: probing rule never probed")
-        if cfg["rule_tag"] not in ("rmst", "sbmst"):
+        if cfg["rule_tag"] not in ("rmst", "sbmst", "ftree"):
             R.check(A["ind"] > 0, f"{lab}: indicator rule never built an indicator")
         if cfg["cover_cuts"]:
             # Instance-dependent, not a configuration fault: on dense graphs

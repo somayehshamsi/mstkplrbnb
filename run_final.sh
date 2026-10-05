@@ -10,6 +10,9 @@
 #   bash run_final.sh confirm      confirmation family X on fresh instances
 #   bash run_final.sh curve        (removed in the revision; does nothing)
 #   bash run_final.sh paper        pooled tests + paper-ready tables
+#   bash run_final.sh classical    classical baseline (K) + DCUT callback timing (GT);
+#                                  NEW root only, e.g. MSTKP_FINAL_ROOT=$HOME/mstkp_classical
+#   bash run_final.sh classical-smoke   the same pipeline on small graphs (~5 min)
 #   bash run_final.sh status       progress per family
 #   bash run_final.sh report       collect + checks + analysis
 #
@@ -125,6 +128,29 @@ PYEOF
     # is not repeated -- with the exact plain dual R0 has no iteration
     # budget left to vary.  Family XB is empty.
     echo "curve: removed in the revision (family XB is empty); nothing to run." ;;
+  classical)
+    # Classical baseline (family K) and the DCUT callback timing (family GT).
+    # The solver code changed for these, so they run under their own root;
+    # the instances are regenerated bit-identically (same DESIGN_VERSION).
+    # COMPARE_ROOT=<old root> also checks the instances and the R0-rel-dw
+    # runs against the old root.
+    $FS generate --family K,GT --jobs "$GEN_JOBS"
+    $FS run --family K,GT --jobs "$JOBS" --mem-budget "$MEM"
+    $FS collect --family K,GT || echo "!! collect reported integrity problems (see above)"
+    rc=0
+    $PY smoke_check.py --root "$ROOT" --profile final --family K,GT || rc=$?
+    $PY classical_report.py --root "$ROOT" ${COMPARE_ROOT:+--compare-root $COMPARE_ROOT}
+    exit "$rc" ;;
+  classical-smoke)
+    R="${SMOKE}_classical"; S="$PY final_suite.py --profile smoke --root $R"
+    $S generate --family K,GT --jobs "$GEN_JOBS"
+    $S run --family K,GT --jobs "$JOBS" --mem-budget "$MEM"
+    $S collect --family K,GT || echo "!! collect reported integrity problems (see above)"
+    rc=0
+    $PY smoke_check.py --root "$R" --profile smoke --family K,GT \
+        ${SMOKE_ALLOW_STATUS:+--allow-status $SMOKE_ALLOW_STATUS} || rc=$?
+    $PY classical_report.py --root "$R" --profile smoke --boot 2000
+    if [ "$rc" = 0 ]; then echo "CLASSICAL SMOKE TEST PASSED"; else echo "!! CLASSICAL SMOKE CHECKS FAILED"; exit "$rc"; fi ;;
   paper)
     # Pooled confirmation tests and paper-ready tables (reads tables/ only).
     $PY paper_tables.py --root "$ROOT" --profile final ;;

@@ -208,6 +208,10 @@ class MSTNode(Node):
         self.lookahead_lambda = lookahead_lambda
 
         self.depth = depth
+        # CLASSICAL BASELINE (feasible_tree rule): the tree a node is being
+        # partitioned along, handed to its include child by create_children.
+        self.partition_tree = None
+        self._ftree_used = None
         # create_children and create_single_child hand these down as
         # frozensets of already-normalised edges, so re-normalising them was
         # an O(depth) rebuild of three sets per node for nothing.
@@ -395,6 +399,9 @@ class MSTNode(Node):
             inherited_multipliers=self.cut_multipliers,
             depth=self.depth
         )
+        # CLASSICAL BASELINE: cheapest budget-feasible tree of this node's dual
+        # (None unless the exact plain dual ran).  Read by feasible_tree only.
+        self.node_feasible_tree = getattr(self.lagrangian_solver, "node_feasible_tree", None)
 
         # A child's feasible region is a subset of its parent's, so every lower
         # bound valid at the parent is valid here: the node bound is the better
@@ -698,6 +705,12 @@ class MSTNode(Node):
         solver = self.lagrangian_solver
 
         if not getattr(solver, "use_rc_fixing", True):
+            return
+        # CLASSICAL BASELINE: rc_fix_max_depth = 0 applies the test at the
+        # root only, as the peg test of Kataoka and Yamada (2016) does; the
+        # fixings then hold for the whole tree.  None (default) = every node.
+        _max_d = getattr(solver, "rc_fix_max_depth", None)
+        if _max_d is not None and self.depth > int(_max_d):
             return
 
         ub = getattr(MSTNode, "global_upper_bound", float("inf"))
@@ -1056,6 +1069,9 @@ class MSTNode(Node):
             excluded_child_edges=F_excluded,
         )
         if _prune_excl:
+            if (self.branching_rule == "feasible_tree" and fixed_child is not None
+                    and self._ftree_used is not None):
+                fixed_child.partition_tree = self._ftree_used
             return fixed_child, None
         if forced_excl:
             F_excluded = F_excluded | forced_excl
@@ -1083,6 +1099,9 @@ class MSTNode(Node):
             parent_lower_bound=self.local_lower_bound
         )
 
+        if (self.branching_rule == "feasible_tree" and fixed_child is not None
+                and self._ftree_used is not None):
+            fixed_child.partition_tree = self._ftree_used
         return fixed_child, excluded_child
 
   
@@ -1439,6 +1458,38 @@ class MSTNode(Node):
             ]
 
             return [candidate_edges[0]] if candidate_edges else None
+
+        elif self.branching_rule == "feasible_tree":
+            # CLASSICAL BASELINE: partition along a feasible tree, as in
+            # Aggarwal, Aneja and Nair (1982).  Their node is split into the
+            # sets {e_1..e_(k-1) in, e_k out}, k = 1..n-1, along the edges of
+            # the best feasible tree t on the node's frontier.  As a binary
+            # search this is: branch on the first free edge of t; the exclude
+            # child is their k-th set and computes its own tree, the include
+            # child keeps partitioning along the SAME t (passed down by
+            # create_children).  No indicator, no probes; the order of t's
+            # edges is fixed (sorted) and deterministic.
+            def _free(e):
+                return (e not in self.fixed_edges and e not in self.excluded_edges
+                        and e not in self.branched_edges)
+            for src, tree in (("partition", self.partition_tree),
+                              ("feasible", self.node_feasible_tree),
+                              ("lagrangian", self.mst_edges)):
+                if not tree:
+                    continue
+                tree = tuple(sorted(tuple(sorted(e)) for e in tree))
+                # An inherited tree that reduced-cost fixing has cut out of
+                # this node no longer describes the partition: use the
+                # node's own feasible tree instead.
+                if src == "partition" and any(e in self.excluded_edges for e in tree):
+                    continue
+                free = [e for e in tree if _free(e)]
+                if free:
+                    # The include child continues along a FEASIBLE tree only;
+                    # the Lagrangian tree is a last-resort fallback.
+                    self._ftree_used = tree if src != "lagrangian" else None
+                    return [free[0]]
+            return None
 
         elif self.branching_rule == "random_mst":
             candidate_edges = [e for e in self.mst_edges if e not in self.fixed_edges and

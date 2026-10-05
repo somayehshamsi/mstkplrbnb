@@ -291,6 +291,9 @@ RULES = {  # tag -> (code name, uses the LR indicator)
     "pc": ("pseudocost", True), "sbf": ("sb_fractional", True),
     "hyb": ("hybrid_strong_fractional", True), "rfrac": ("random_fractional", True),
     "rmst": ("random_mst", False), "sbmst": ("strong_branching", False),
+    # CLASSICAL BASELINE: partition along the node's best feasible tree
+    # (Aggarwal, Aneja and Nair 1982), as binary branching; no indicator.
+    "ftree": ("feasible_tree", False),
 }
 VARIANTS = {
     "": {}, "noexact": {"exact_cut_dual": False}, "norc": {"use_rc_fixing": False},
@@ -314,6 +317,9 @@ VARIANTS = {
     #   cp2    cut phase of 2 x max_iter (10 / 20)
     "subgr": {"exact_plain_dual": False},
     "cp1": {"cut_phase_frac": 1.0}, "cp2": {"cut_phase_frac": 2.0},
+    # CLASSICAL BASELINE: reduced-cost fixing at the root only (the peg test
+    # of Kataoka and Yamada 2016 is applied once, before the search).
+    "rootfix": {"rc_fix_max_depth": 0},
 }
 GRB_FORMS = ("SCF", "DMCF", "DCUT", "CUTSETLAZY")
 
@@ -364,6 +370,14 @@ BRANCH_DW = [c for r in BRANCH_RUNGS for c in
              ([lr_config_id(r, "rmst"), lr_config_id(r, "sbmst")]
               + [lr_config_id(r, t, "dw") for t in ("rfrac", "mf", "pc", "sbf", "rel", "hyb")])]
 GRB3 = ["GRB-SCF", "GRB-DMCF", "GRB-DCUT"]
+# CLASSICAL BASELINE: branching {DW reliability, feasible-tree partition} x
+# reduced-cost fixing {every node, root only}, cut-free rung, exact node dual,
+# plus random branching on fractional DW edges (no probes), which compares the
+# candidate sets -- fractional edges vs. a feasible tree -- at equal probe cost.
+CLASSICAL = [lr_config_id("R0", "rel"), lr_config_id("R0", "rfrac"),
+             lr_config_id("R0", "ftree"),
+             lr_config_id("R0", "rel", variant="rootfix"),
+             lr_config_id("R0", "ftree", variant="rootfix")]
 KNOBS_D = {+0.5: 0.366, 0.0: 0.0, -0.5: -0.366, -0.9: -0.674}   # rho -> knob
 CAL_CANDIDATES = {"F1": {"knob": 0.0, "betas": [0.08, 0.10, 0.12]},
                   "F2": {"knob": -0.674, "betas": [0.10, 0.12, 0.15]}}
@@ -390,6 +404,10 @@ FAMILY_INFO = {
     "GLAZY": ("optional", "Lazy undirected cut-set (continuity with the previous version)."),
     "X": ("confirm", "Confirmation on NEW fresh instances: R0, R2, R5, R5 with shorter cut phases, Gurobi DCUT."),
     "XB": ("confirm", "(first study only; empty in the revised design)"),
+    # CLASSICAL BASELINE (added after the revision; run under its own root):
+    "K": ("classical", "Classical baseline on R0: feasible-tree partitioning x root-only fixing (2x2) "
+                       "+ random fractional; headline / rho=-0.9 / n=800 cells."),
+    "GT": ("classical", "Gurobi DCUT with callback timing on the cells of K."),
 }
 CORE_FAMILIES = [f for f, (kind, _) in FAMILY_INFO.items() if kind == "core"]
 
@@ -542,6 +560,23 @@ def build_families(profile, root):
     fam["O2"] = [(core(0.15), list(range(_count(profile, 50))),
                   rel(["R3root", "R4root", "R5root"]))]
     fam["GLAZY"] = [(core(0.15), list(range(_count(profile, 50))), ["GRB-CUTSETLAZY"])]
+    # CLASSICAL BASELINE.  The 2 x 2 design on the cut-free rung, exact node
+    # dual throughout: branching (reliability on fractional DW edges vs.
+    # partitioning along the best feasible tree, as in Aggarwal et al. 1982)
+    # x reduced-cost fixing (every node vs. root only, as in Kataoka and
+    # Yamada 2016).  R0-ftree-rootfix is the classical scheme.  Cells: the
+    # headline cell (A's 100 instances), rho = -0.9 (D's 25) and n = 800 at
+    # average degree 15 (C's 25) -- the same instances as in those families.
+    KCFG = CLASSICAL
+    kcells = [(core(0.15), list(range(_count(profile, 100)))),
+              (core(0.15, KNOBS_D[-0.9]), list(range(_count(profile, 25)))),
+              (fam["C"][-1][0], list(range(_count(profile, 25))))]      # C's n = 800 cell
+    fam["K"] = [(c, i, KCFG) for c, i in kcells]
+    # Gurobi DCUT on the same cells, with the time inside its Python callback
+    # recorded (first 50 headline instances, as AGRB).
+    fam["GT"] = [(kcells[0][0], list(range(_count(profile, 50))), ["GRB-DCUT"]),
+                 (kcells[1][0], kcells[1][1], ["GRB-DCUT"]),
+                 (kcells[2][0], kcells[2][1], ["GRB-DCUT"])]
     return fam
 
 
@@ -1731,11 +1766,14 @@ PAPER_METRICS = [
     "mst_evaluations",
     # gurobi
     "build_time", "grb_runtime", "user_cuts", "lazy_cuts",
+    # CLASSICAL BASELINE: time inside the Gurobi callback
+    "callback_time", "sep_callback_time", "callback_calls",
 ]
 CFG_COLS = ["solver", "rung", "rule_tag", "branching_rule", "frac_source", "variant",
             "cover_cuts", "cut_strengthening", "cut_root_only", "max_active_cuts",
             "rank_lift", "exact_cut_dual", "use_rc_fixing", "cutoff", "max_iter",
-            "root_max_iter", "formulation", "exact_plain_dual", "cut_phase_frac"]
+            "root_max_iter", "formulation", "exact_plain_dual", "cut_phase_frac",
+            "rc_fix_max_depth"]
 META_COLS = ["m", "avg_degree", "rho_realized", "plain_lr_bound", "plain_lr_lambda",
              "min_length_tree_weight", "len_Tw", "len_Tl"]
 
@@ -1915,6 +1953,7 @@ TRY_SETS = {
     "ladder": LADDER6, "branching": BRANCH_DW, "gurobi": GRB3,
     # REVISION: the first study's subgradient dual next to the exact one
     "controls": ["R0-rel-dw-subgr", "R5-rel-dw-subgr"],
+    "classical": CLASSICAL,
 }
 
 

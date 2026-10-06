@@ -62,7 +62,7 @@ if CODE_DIR not in sys.path:
 DESIGN_VERSION = "mstkp-final-v1"
 SOLVER_FILES = ("lagrangianrelaxation.py", "mstkpbranchandbound.py",
                 "branchandbound.py", "mstkpinstance.py", "benchmark_mstkp_.py",
-                "gurobi_baselines.py")
+                "gurobi_baselines.py", "cg_cut_phase.py")
 HOST = socket.gethostname()
 IS_WINDOWS = os.name == "nt"
 
@@ -320,6 +320,12 @@ VARIANTS = {
     # CLASSICAL BASELINE: reduced-cost fixing at the root only (the peg test
     # of Kataoka and Yamada 2016 is applied once, before the search).
     "rootfix": {"rc_fix_max_depth": 0},
+    # CUT DUAL BY COLUMN GENERATION (cg_cut_phase.py): the node's cut phase
+    # solves the cut-augmented Dantzig-Wolfe master by column generation with
+    # MST pricing, instead of the subgradient cut phase and the exact
+    # cut-dual step; its LP solution is the branching indicator.  Probes are
+    # unchanged.  Needs highspy.
+    "cg": {"cut_dual": "cg"},
 }
 GRB_FORMS = ("SCF", "DMCF", "DCUT", "CUTSETLAZY")
 
@@ -378,6 +384,13 @@ CLASSICAL = [lr_config_id("R0", "rel"), lr_config_id("R0", "rfrac"),
              lr_config_id("R0", "ftree"),
              lr_config_id("R0", "rel", variant="rootfix"),
              lr_config_id("R0", "ftree", variant="rootfix")]
+# CUT DUAL BY COLUMN GENERATION: no cuts, subgradient cut phase, column-
+# generation cut phase, under reliability and pseudo-cost branching.
+CUTDUAL = [lr_config_id("R0", "rel"), lr_config_id("R5", "rel"),
+           lr_config_id("R5", "rel", variant="cg"),
+           lr_config_id("R0", "pc"), lr_config_id("R5", "pc"),
+           lr_config_id("R5", "pc", variant="cg")]
+CUTDUAL_EXTRA = [lr_config_id("R2", "pc", variant="cg")]     # literature covers, CG
 KNOBS_D = {+0.5: 0.366, 0.0: 0.0, -0.5: -0.366, -0.9: -0.674}   # rho -> knob
 CAL_CANDIDATES = {"F1": {"knob": 0.0, "betas": [0.08, 0.10, 0.12]},
                   "F2": {"knob": -0.674, "betas": [0.10, 0.12, 0.15]}}
@@ -408,6 +421,12 @@ FAMILY_INFO = {
     "K": ("classical", "Classical baseline on R0: feasible-tree partitioning x root-only fixing (2x2) "
                        "+ random fractional; headline / rho=-0.9 / n=800 cells."),
     "GT": ("classical", "Gurobi DCUT with callback timing on the cells of K."),
+    # CUT DUAL BY COLUMN GENERATION (added after the classical baseline; run
+    # under its own root):
+    "CG": ("cutdual", "Cut phase by column generation (variant cg) against the subgradient cut "
+                      "phase and no cuts, reliability and pseudo-cost branching: headline, "
+                      "correlation, density x budget grid, loose budgets, scaling, complete graphs."),
+    "CGX": ("cutdual", "The same comparison on X's fresh confirmation instances."),
 }
 CORE_FAMILIES = [f for f, (kind, _) in FAMILY_INFO.items() if kind == "core"]
 
@@ -577,6 +596,26 @@ def build_families(profile, root):
     fam["GT"] = [(kcells[0][0], list(range(_count(profile, 50))), ["GRB-DCUT"]),
                  (kcells[1][0], kcells[1][1], ["GRB-DCUT"]),
                  (kcells[2][0], kcells[2][1], ["GRB-DCUT"])]
+    # CUT DUAL BY COLUMN GENERATION.  On every cell: no cuts (R0), the
+    # subgradient cut phase (R5) and the column-generation cut phase (R5-cg),
+    # each under reliability and under pseudo-cost branching, plus the
+    # literature covers with the column-generation cut phase (R2-pc-cg).  The
+    # instances are those of the families named (same cells, same seeds).
+    _cg_cells = (
+        [(core(0.15), list(range(_count(profile, 100))))]                       # A
+        + [(core(0.15, KNOBS_D[r]), list(range(_count(profile, 40 if r == -0.9 else 25))))
+           for r in (+0.5, -0.5, -0.9)]                                         # D (+ F's rho=-0.9)
+        + [(c, i) for c, i, _ in fam["B"]]                                      # B
+        + [(c, i) for c, i, _ in fam["BL"]]                                     # BL
+        + [(c, i) for c, i, _ in fam["C"]]                                      # C
+        + [(c, i) for c, i, _ in fam["H"]])                                     # H
+    _seen_cells = set()
+    fam["CG"] = []
+    for c, i in _cg_cells:          # B's and C's headline cells are A's cell: listed once
+        if c["id"] not in _seen_cells:
+            _seen_cells.add(c["id"])
+            fam["CG"].append((c, i, CUTDUAL + CUTDUAL_EXTRA))
+    fam["CGX"] = [(c, i, CUTDUAL) for c, i, _ in fam["X"]]
     return fam
 
 
@@ -1764,6 +1803,9 @@ PAPER_METRICS = [
     # REVISION: exact plain dual
     "plain_dual_calls", "plain_dual_msts", "plain_dual_capped", "root_plain_dual_msts",
     "mst_evaluations",
+    # CUT DUAL BY COLUMN GENERATION
+    "cg_nodes", "cg_lp_solves", "cg_lp_time", "cg_msts", "cg_gain_nodes", "cg_gain",
+    "cg_early_stops", "cg_sep_rounds", "root_cg_msts",
     # gurobi
     "build_time", "grb_runtime", "user_cuts", "lazy_cuts",
     # CLASSICAL BASELINE: time inside the Gurobi callback
@@ -1773,7 +1815,7 @@ CFG_COLS = ["solver", "rung", "rule_tag", "branching_rule", "frac_source", "vari
             "cover_cuts", "cut_strengthening", "cut_root_only", "max_active_cuts",
             "rank_lift", "exact_cut_dual", "use_rc_fixing", "cutoff", "max_iter",
             "root_max_iter", "formulation", "exact_plain_dual", "cut_phase_frac",
-            "rc_fix_max_depth"]
+            "rc_fix_max_depth", "cut_dual"]
 META_COLS = ["m", "avg_degree", "rho_realized", "plain_lr_bound", "plain_lr_lambda",
              "min_length_tree_weight", "len_Tw", "len_Tl"]
 
@@ -1954,6 +1996,7 @@ TRY_SETS = {
     # REVISION: the first study's subgradient dual next to the exact one
     "controls": ["R0-rel-dw-subgr", "R5-rel-dw-subgr"],
     "classical": CLASSICAL,
+    "cutdual": CUTDUAL + CUTDUAL_EXTRA,
 }
 
 

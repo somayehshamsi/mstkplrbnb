@@ -13,6 +13,9 @@
 #   bash run_final.sh classical    classical baseline (K) + DCUT callback timing (GT);
 #                                  NEW root only, e.g. MSTKP_FINAL_ROOT=$HOME/mstkp_classical
 #   bash run_final.sh classical-smoke   the same pipeline on small graphs (~5 min)
+#   bash run_final.sh cutdual      cut phase by column generation (CG, CGX);
+#                                  NEW root only, e.g. MSTKP_FINAL_ROOT=$HOME/mstkp_cutdual
+#   bash run_final.sh cutdual-smoke     the same pipeline on small graphs (~10 min)
 #   bash run_final.sh status       progress per family
 #   bash run_final.sh report       collect + checks + analysis
 #
@@ -151,6 +154,35 @@ PYEOF
         ${SMOKE_ALLOW_STATUS:+--allow-status $SMOKE_ALLOW_STATUS} || rc=$?
     $PY classical_report.py --root "$R" --profile smoke --boot 2000
     if [ "$rc" = 0 ]; then echo "CLASSICAL SMOKE TEST PASSED"; else echo "!! CLASSICAL SMOKE CHECKS FAILED"; exit "$rc"; fi ;;
+  cutdual|cutdual-smoke)
+    # Cut phase by column generation (variant cg, cg_cut_phase.py) against
+    # the subgradient cut phase and no cuts (families CG and CGX).  The
+    # solver code changed, so this runs under its own root; the instances are
+    # regenerated bit-identically (same DESIGN_VERSION).
+    $PY -c "import highspy" 2>/dev/null || { echo "!! variant cg needs highspy: pip install highspy"; exit 1; }
+    if [ "$1" = cutdual ]; then R="$ROOT"; P=final; B=10000; else R="${SMOKE}_cutdual"; P=smoke; B=2000; fi
+    # Refuse a root frozen with other solver code (e.g. the revision root)
+    # BEFORE generate touches it.
+    if [ -f "$R/frozen/design.json" ]; then
+      $PY - "$R" <<'PYEOF' || exit 1
+import os, sys
+import final_suite as FS
+fz = FS.read_json(os.path.join(sys.argv[1], "frozen", "design.json"))
+if fz.get("solver_code_hash") != FS.solver_code_hash():
+    sys.exit(f"!! {sys.argv[1]} was frozen with other solver code: "
+             f"set MSTKP_FINAL_ROOT to a NEW root for the cut-dual runs")
+PYEOF
+    fi
+    S="$PY final_suite.py --profile $P --root $R"
+    $S generate --family CG,CGX --jobs "$GEN_JOBS"
+    $S run --family CG,CGX --jobs "$JOBS" --mem-budget "$MEM"
+    $S collect --family CG,CGX || echo "!! collect reported integrity problems (see above)"
+    rc=0
+    $PY smoke_check.py --root "$R" --profile "$P" --family CG,CGX \
+        ${SMOKE_ALLOW_STATUS:+--allow-status $SMOKE_ALLOW_STATUS} || rc=$?
+    $PY cutdual_report.py --root "$R" --profile "$P" --boot "$B" \
+        ${COMPARE_ROOT:+--compare-root $COMPARE_ROOT}
+    if [ "$rc" = 0 ]; then echo "CUTDUAL CHECKS PASSED ($P)"; else echo "!! CUTDUAL CHECKS FAILED ($P)"; exit "$rc"; fi ;;
   paper)
     # Pooled confirmation tests and paper-ready tables (reads tables/ only).
     $PY paper_tables.py --root "$ROOT" --profile final ;;
@@ -163,5 +195,5 @@ PYEOF
     $PY analyze_final.py --root "$ROOT" --profile final --family "${2:-core}"
     exit "$rc" ;;
   *)
-    sed -n '2,20p' "$0"; exit 1 ;;
+    sed -n '2,23p' "$0"; exit 1 ;;
 esac

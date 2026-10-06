@@ -44,12 +44,16 @@ _SOLVER_KEYS = [
     ("exact_plain_dual", False), ("exact_plain_max_msts", 60),
     # CLASSICAL BASELINE: depth limit of reduced-cost fixing (None = every node)
     ("rc_fix_max_depth", None),
+    # CUT DUAL BY COLUMN GENERATION: "subgradient" (default) or "cg"
+    ("cut_dual", "subgradient"),
 ]
 # Probes only need the cut-shaping ones.
 _PROBE_KEYS = ["cut_strengthening", "max_active_cuts", "max_cut_depth",
                "rank_lift", "exact_cut_dual", "lift_cuts", "dual_seed",
                "use_cover_cuts", "cut_phase_frac",
-               "exact_plain_dual", "exact_plain_max_msts"]
+               "exact_plain_dual", "exact_plain_max_msts",
+               # CUT DUAL BY COLUMN GENERATION: must stay "subgradient" in probes
+               "cut_dual"]
 
 
 def _json_num(v):
@@ -109,6 +113,10 @@ def build_overrides(config):
         ov["rc_fix_max_depth"] = int(config["rc_fix_max_depth"])
     if config.get("root_max_iter") is not None:
         ov["root_max_iter"] = int(config["root_max_iter"])
+    # CUT DUAL BY COLUMN GENERATION: only the variant declares it, so every
+    # other configuration builds exactly the overrides it did before.
+    if config.get("cut_dual") not in (None, "subgradient"):
+        ov["cut_dual"] = str(config["cut_dual"])
     if config["cover_cuts"]:
         ov["cut_strengthening"] = config["cut_strengthening"]
         ov["max_active_cuts"] = int(config["max_active_cuts"])
@@ -125,6 +133,10 @@ def run_lrbnb(instance, config, time_limit, instance_seed, cutoff=None):
 
     overrides = build_overrides(config)
     MSTNode.objective_cutoff = float(cutoff) if cutoff is not None else None
+    if overrides.get("cut_dual") == "cg":
+        import cg_cut_phase
+        if cg_cut_phase.highspy is None:
+            raise RuntimeError("variant cg needs highspy (pip install highspy)")
 
     start_total = time.time()
     cpu0 = time.process_time()
@@ -154,6 +166,7 @@ def run_lrbnb(instance, config, time_limit, instance_seed, cutoff=None):
     root_lb = float(getattr(root, "local_lower_bound", float("nan")))
     root_lr_iterations = int(LagrangianMST.lr_iterations)
     root_plain_msts = int(LagrangianMST.plain_dual_msts)
+    root_cg_msts = int(LagrangianMST.cg_msts)
 
     solver = root.lagrangian_solver
     effective = {k: _json_num(getattr(solver, k, d)) for k, d in _SOLVER_KEYS}
@@ -219,7 +232,18 @@ def run_lrbnb(instance, config, time_limit, instance_seed, cutoff=None):
         "plain_dual_msts": int(LagrangianMST.plain_dual_msts),
         "plain_dual_capped": int(LagrangianMST.plain_dual_capped),
         "root_plain_dual_msts": root_plain_msts,
-        "mst_evaluations": int(LagrangianMST.lr_iterations) + int(LagrangianMST.plain_dual_msts),
+        # CUT DUAL BY COLUMN GENERATION: + its pricing MSTs (0 otherwise)
+        "mst_evaluations": int(LagrangianMST.lr_iterations) + int(LagrangianMST.plain_dual_msts)
+                           + int(LagrangianMST.cg_msts),
+        "cg_nodes": int(LagrangianMST.cg_nodes),
+        "cg_lp_solves": int(LagrangianMST.cg_lp_solves),
+        "cg_lp_time": float(LagrangianMST.cg_lp_time),
+        "cg_msts": int(LagrangianMST.cg_msts),
+        "root_cg_msts": root_cg_msts,
+        "cg_gain_nodes": int(LagrangianMST.cg_gain_nodes),
+        "cg_gain": float(LagrangianMST.cg_gain),
+        "cg_early_stops": int(LagrangianMST.cg_early_stops),
+        "cg_sep_rounds": int(LagrangianMST.cg_sep_rounds),
         "probes": int(MSTNode.probe_calls),
         "probe_time": float(MSTNode.probe_time),
         "forced_decisions": int(MSTNode.forced_decisions),

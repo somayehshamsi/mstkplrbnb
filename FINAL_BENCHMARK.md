@@ -1,5 +1,69 @@
 # Frozen final benchmark (MSTKP / LR-BnB)
 
+## Cut phase by column generation (added after the classical baseline)
+
+New variant `cg` (file `cg_cut_phase.py`).  At a node with cover cuts, the
+cut rungs normally run a subgradient cut phase on (lambda, mu) after the
+exact plain dual, and then the exact cut-dual step.  With `-cg` that phase is
+replaced by column generation on the node's cut-augmented Dantzig-Wolfe
+master (convexity, budget and one row per active cover; MST pricing under
+w + lambda l + sum mu_k 1[S_k]; HiGHS through highspy, warm-started after
+every added column).  Every pricing step gives a valid Lagrangian bound and
+the node keeps the best one.  After the master converges, the budget-violating
+tree with the largest weight in its solution is separated (the same Section 6
+separation), violated covers enter as rows (pool cap 5; covers with mu = 0
+make room first), and the master is solved again -- one separation round per
+node.  Column generation stops early once the bound prunes the node.  The
+master's solution, summed per edge, is the node's LP solution under its
+covers and is the branching indicator.  Strong-branching probes are
+unchanged (they never run this phase), so `R5-...-cg` differs from `R5-...`
+only in the cut phase of the node solves.
+
+Every other configuration is unchanged: `cut_dual` is passed to the solver
+only by the variant, and `--compare-root` checks R0 / R5 against the old root
+run by run (objective and node count).
+
+Configurations (families CG and CGX):
+
+* `R0-rel-dw`, `R5-rel-dw`, `R5-rel-dw-cg`   reliability branching
+* `R0-pc-dw`,  `R5-pc-dw`,  `R5-pc-dw-cg`    pseudo-cost branching
+* `R2-pc-dw-cg`                             literature covers with the CG cut phase (CG only)
+
+Cells: **CG** = A's headline cell (100), D's correlations rho = +0.5, -0.5
+(25 each) and -0.9 (40, as F), B's grid, BL's loose budgets, C's scaling
+cells and H's complete graphs (same instances as those families);
+**CGX** = X's fresh confirmation cells.  5530 + 690 runs.
+
+New metrics: `cg_nodes`, `cg_lp_solves`, `cg_lp_time`, `cg_msts` (pricing
+MSTs, included in `mst_evaluations`), `root_cg_msts`, `cg_gain_nodes`,
+`cg_gain`, `cg_early_stops`, `cg_sep_rounds`.  Checks: V (brute force)
+includes the three `-cg` configurations; the smoke check asserts that the
+node solver runs the configured cut phase, that probes never run it, and that
+only `-cg` configurations ever enter it.
+
+```bash
+pip install highspy                                    # needed by variant cg
+export MSTKP_FINAL_ROOT=$HOME/mstkp_cutdual            # NEW root
+bash run_final.sh validate                             # must end with "0 failures"
+bash run_final.sh cutdual-smoke                        # ~10 min, must PASS
+COMPARE_ROOT=$HOME/mstkp_final_v2 setsid nohup bash run_final.sh cutdual > cutdual.out 2>&1 &
+```
+
+Files: new `cg_cut_phase.py` (the variant) and `cutdual_report.py` (tables);
+changed `lagrangianrelaxation.py` (three hooks: the call after the exact
+plain dual, the reset of the LP solution, the indicator shortcut; counters),
+`benchmark_mstkp_.py` (override, metrics), `final_suite.py` (variant, families,
+columns), `smoke_check.py`, `run_final.sh`, this file.  Nothing else changed.
+Checked before release: R0-rel-dw and R5-rel-dw reproduce the old code's
+objective, node count, root bound and cut count on headline instances;
+`validate_cuts.py` 0 failures (1692 LR-BnB runs, the three `-cg` ones
+included); `cutdual-smoke` passes.
+
+Tables: `ROOT/paper/CG_pooled`, `CG_cells`, `CG_headline` (.md / .tex / .csv),
+also printed at the end of `cutdual.out`; rerun them alone with
+`python3 cutdual_report.py --root $MSTKP_FINAL_ROOT --compare-root <old root>`.
+
+
 ## Revision (exact plain dual) -- read first
 
 The revision changes one thing in the solver: at every node and every

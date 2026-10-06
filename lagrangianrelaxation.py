@@ -85,6 +85,15 @@ class LagrangianMST:
     plain_dual_calls = 0   # node solves + probes that ran the exact plain dual
     plain_dual_msts = 0    # MST computations spent inside it
     plain_dual_capped = 0  # ... that hit exact_plain_max_msts before certifying
+    # Variant `cg` (cg_cut_phase.py): the cut phase by column generation.
+    cg_nodes = 0           # node solves whose cut phase ran by column generation
+    cg_lp_solves = 0       # master LP solves
+    cg_lp_time = 0.0       # seconds inside them
+    cg_msts = 0            # pricing MSTs
+    cg_gain_nodes = 0      # ... nodes where it raised the bound above the plain dual
+    cg_gain = 0.0          # total bound raised
+    cg_early_stops = 0     # stops because the bound already pruned the node
+    cg_sep_rounds = 0      # separation rounds that added covers
 
     # Frozen-benchmark instrumentation (all reset per run by reset_cut_stats).
     # Paper metrics: separation and indicator time/volume and the indicator
@@ -1682,6 +1691,14 @@ class LagrangianMST:
         cls.plain_dual_calls = 0
         cls.plain_dual_msts = 0
         cls.plain_dual_capped = 0
+        cls.cg_nodes = 0
+        cls.cg_lp_solves = 0
+        cls.cg_lp_time = 0.0
+        cls.cg_msts = 0
+        cls.cg_gain_nodes = 0
+        cls.cg_gain = 0.0
+        cls.cg_early_stops = 0
+        cls.cg_sep_rounds = 0
 
     # ------------------------------------------------------------------
     # REVISION: exact plain (cut-free) dual by the breakpoint method
@@ -2175,6 +2192,9 @@ class LagrangianMST:
     def solve(self, inherited_cuts=None, inherited_multipliers=None, depth=0, node=None):
         start_time = time()
         self.depth = depth
+        # Variant `cg`: the node's LP solution under its covers, set by the
+        # column-generation cut phase and read by the branching indicator.
+        self._cg_frac = None
         
         # --- robust normalization of inherited_cuts (accept pairs or indices) ---
         edge_indices = self.edge_indices
@@ -3480,6 +3500,25 @@ class LagrangianMST:
                     f"L*={_pd['bound']:.9g}, msts={_pd['msts']}, exact={_pd['exact']}",
                     force=True,
                 )
+
+            # ------------------------------------------------------------------
+            # 4c) Variant `cg`: the cut phase by column generation on the
+            # node's cut-augmented Dantzig-Wolfe master (cg_cut_phase.py)
+            # instead of the subgradient cut phase and the exact cut-dual step
+            # below.  Node solves only: probe solvers never receive
+            # `cut_dual`, so strong branching is unchanged.
+            # ------------------------------------------------------------------
+            if (getattr(self, "cut_dual", "subgradient") == "cg"
+                    and cuts_enabled_here and exact_plain_done
+                    and not getattr(self, "_is_probe", False)):
+                from cg_cut_phase import cg_cut_phase
+                _feasible = cg_cut_phase(self, _pd["trees"], cutting_active_here,
+                                         max_active_cuts)
+                end_time = time()
+                LagrangianMST.total_compute_time += end_time - start_time
+                if not _feasible:
+                    return float("inf"), self.best_upper_bound, node_new_cuts
+                return self.best_lower_bound, self.best_upper_bound, node_new_cuts
 
             # Separation follows Algorithm 2 line 10: every budget-violating
             # tree produced by the multiplier sequence yields one seed cover.
@@ -5523,6 +5562,11 @@ class LagrangianMST:
         the multiplier sequence produced, under the budget and the active
         cover cuts.  Used only to rank branching candidates.
         """
+        # Variant `cg`: the column-generation master already is the node's LP
+        # under its covers; its solution is the indicator.
+        if getattr(self, "_cg_frac", None) is not None:
+            return dict(self._cg_frac)
+
         start_time = time()
 
         if not self.primal_solutions:

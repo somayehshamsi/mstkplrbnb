@@ -143,6 +143,17 @@ def main():
                     f"{lab}: PROBE solver exact_plain_dual={peff.get('exact_plain_dual')} != {want_epd}")
         R.check((mt.get("plain_dual_calls", 0) > 0) == want_epd,
                 f"{lab}: plain_dual_calls={mt.get('plain_dual_calls')} with exact_plain_dual={want_epd}")
+        # CUT DUAL BY COLUMN GENERATION: the node solver runs the configured
+        # cut phase, the probe solvers always the subgradient one, and only the
+        # variant ever enters the column-generation phase.
+        want_cd = cfg.get("cut_dual", "subgradient")
+        R.check(eff.get("cut_dual", "subgradient") == want_cd,
+                f"{lab}: node solver cut_dual={eff.get('cut_dual')} != {want_cd}")
+        if peff:
+            R.check(peff.get("cut_dual", "subgradient") == "subgradient",
+                    f"{lab}: PROBE solver cut_dual={peff.get('cut_dual')}")
+        if want_cd != "cg":
+            R.check(not mt.get("cg_nodes"), f"{lab}: cg_nodes={mt.get('cg_nodes')} without variant cg")
         R.check(abs(float(eff.get("cut_phase_frac", 3.0)) - float(cfg.get("cut_phase_frac", 3.0))) < 1e-12,
                 f"{lab}: cut_phase_frac={eff.get('cut_phase_frac')} != {cfg.get('cut_phase_frac', 3.0)}")
         # REVISION: with the exact plain dual the root bound reaches L* (the
@@ -201,7 +212,7 @@ def main():
         A = agg.setdefault((j.cell["id"], j.cfg), {"cfg": cfg, "nodes": 0, "probes": 0,
                                                     "rank": 0, "exact": 0, "rc": 0,
                                                     "ind": 0, "cuts": 0, "branched": 0,
-                                                    "solved_branched": 0})
+                                                    "solved_branched": 0, "cg": 0, "runs": 0})
         A["nodes"] += mt["nodes"]
         A["probes"] += mt["probes"]
         A["rank"] += dg.get("rank_lift_calls", 0)
@@ -210,11 +221,16 @@ def main():
         A["ind"] += mt["indicator_calls"]
         A["cuts"] += mt["cuts_separated"]
         A["branched"] += int(mt["nodes"] > 1)
+        A["cg"] += int(mt.get("cg_nodes") or 0)
+        A["runs"] += 1
         A["solved_branched"] += int(mt["nodes"] > 1 and st == "optimal")
 
     # aggregate signatures: the components a configuration switches ON did run
     for (cid, c), A in agg.items():
         cfg = A["cfg"]
+        if cfg.get("cut_dual") == "cg" and A["runs"]:
+            # The root of every run has a cut phase (separation is allowed there).
+            R.check(A["cg"] > 0, f"{cid}/{c}: variant cg never ran its column-generation phase")
         if not A["branched"]:
             continue
         lab = f"{cid}/{c}"
@@ -228,7 +244,8 @@ def main():
             # themselves are verified per run from the solver objects above).
             R.note(A["cuts"] > 0, f"{lab}: cut rung separated no cuts "
                                   f"(enabled, read back from the solvers; no violated cover)")
-            if cfg["exact_cut_dual"]:
+            # (variant cg: the step runs in probes only, so nothing to note)
+            if cfg["exact_cut_dual"] and cfg.get("cut_dual") != "cg":
                 R.note(A["exact"] > 0, f"{lab}: exact cut dual never raised a bound "
                                        f"(enabled, read back from the solvers; nothing to improve)")
         # RC fixing needs an incumbent near the bound; a group whose runs all
